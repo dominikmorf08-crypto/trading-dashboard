@@ -34,6 +34,7 @@ UTC = timezone.utc
 
 TARGET_R = 2.0          # Ziel = Einstieg + 2 x Risiko
 MIN_RISK_PCT = 0.0005   # Risiko unter 0,05 % des Kurses: Spanne zu eng
+MIN_RISK_PCT_FX = 0.0002  # Devisen: 0,02 % (rund 2 Pips bei EUR/USD)
 MIN_HISTORY = 8         # so viele vergangene Signale braucht eine Rangierung
 CHASE_LIMIT_R = 0.75    # weiter als 0,75 R gelaufen: nicht mehr "frisch"
 
@@ -203,7 +204,7 @@ def fetch(symbol, offline=None):
 # --------------------------------------------------------------------------
 
 
-def run_session(bars, d, s, now=None, live=None):
+def run_session(bars, d, s, now=None, live=None, min_risk=MIN_RISK_PCT):
     """Eroeffnungsspanne der Session s am Tag d (Ortszeit der Session)."""
     tz = s["tz"]
     t0 = local_to_ts(d, *s["start"], tz)
@@ -249,7 +250,7 @@ def run_session(bars, d, s, now=None, live=None):
     stop = mid
     risk = abs(entry - stop)
     r.update(side=side, entry=entry, stop=stop, risk=risk, trig_ts=b[0] + BAR)
-    if risk < entry * MIN_RISK_PCT:
+    if risk < entry * min_risk:
         r["status"] = "too_tight"
         return r
     target = entry + side * TARGET_R * risk
@@ -277,13 +278,13 @@ def run_session(bars, d, s, now=None, live=None):
     return r
 
 
-def history(bars, s, today):
+def history(bars, s, today, min_risk=MIN_RISK_PCT):
     days = sorted({local(b[0], s["tz"]).date() for b in bars})
     out = {1: [], -1: []}
     for d in days:
         if d >= today:
             continue
-        r = run_session(bars, d, s)
+        r = run_session(bars, d, s, min_risk=min_risk)
         if r.get("status") in ("stop", "target", "closed", "open"):
             out[r["side"]].append(r["R"])
     stats = {}
@@ -319,9 +320,10 @@ def evaluate(now, offline=None, pause=0.3):
             if sym in LONDON_ONLY and s["key"] != "london":
                 continue
             today = local(now, s["tz"]).date()
-            r = run_session(bars, today, s, now=now, live=live)
+            mr = MIN_RISK_PCT_FX if group == "Devisen" else MIN_RISK_PCT
+            r = run_session(bars, today, s, now=now, live=live, min_risk=mr)
             r.update(symbol=sym, name=name, group=group, dec=dec, note=note,
-                     session=s["key"], hist=history(bars, s, today))
+                     session=s["key"], hist=history(bars, s, today, mr))
             rows.append(r)
         if not offline:
             time.sleep(pause)

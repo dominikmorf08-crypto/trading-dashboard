@@ -20,6 +20,7 @@ weil die USA die Uhr zu einem anderen Datum umstellen. Das rechnet das Skript se
 
 - **Signal:** die erste 5-Minuten-Kerze, die **über** der Spanne schliesst (Long) oder **darunter** (Short).
 - **Stop:** Mitte der Spanne. **Ziel:** 2 × das Risiko (2 R).
+- **Zu eng:** Ist das Risiko kleiner als 0,05 % des Kurses (Devisen: 0,02 %), gibt es kein Signal, weil schon der Spread den Stop auslösen könnte.
 - **Historie:** dieselbe Regel, beim gleichen Markt und in der gleichen Session, an den letzten ~60 Tagen
   (so weit reichen die kostenlosen 5-Minuten-Daten).
 - **Beste frische Signale:** aktiv, höchstens 0,75 R vom Einstieg weggelaufen, und die Historie hat mindestens

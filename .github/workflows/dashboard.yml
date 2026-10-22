@@ -1,0 +1,36 @@
+name: Breakout-Dashboard
+
+on:
+  schedule:
+    # alle 5 Minuten von 06:00 bis 21:55 UTC (deckt London und New York ab, Sommer- und Winterzeit)
+    - cron: "*/5 6-21 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Dashboard berechnen
+        run: python orb.py --out site
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v4

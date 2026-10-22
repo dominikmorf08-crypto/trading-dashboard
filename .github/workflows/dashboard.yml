@@ -5,6 +5,8 @@ on:
     # alle 5 Minuten von 06:00 bis 21:55 UTC (deckt London und New York ab, Sommer- und Winterzeit)
     - cron: "*/5 6-21 * * *"
   workflow_dispatch: {}
+  push:
+    branches: [main]
 
 permissions:
   contents: read

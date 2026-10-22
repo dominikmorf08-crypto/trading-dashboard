@@ -397,8 +397,8 @@ STATUS = {
     "forming": "Spanne bildet sich",
     "waiting": "Wartet auf Ausbruch",
     "open": "Signal aktiv",
-    "target": "Ziel erreicht",
-    "stop": "Stop erreicht",
+    "target": "TP erreicht",
+    "stop": "SL erreicht",
     "expired": "Kein Ausbruch",
     "closed": "Session vorbei",
     "too_tight": "Spanne zu eng",
@@ -445,8 +445,8 @@ def quality(h):
 def hist_text(h):
     if not h["n"]:
         return "Noch keine vergangenen Fälle."
-    return (f"Letzte ~60 Tage: {h['n']} Fälle, {h['target']}× Ziel, {h['stop']}× Stop, "
-            f"{h['neither']}× offen, im Schnitt {h['avgR']:+.2f} R.")
+    return (f"Letzte ~60 Tage: {h['n']} gleiche Signale, davon {h['target']}× TP, {h['stop']}× SL, "
+            f"{h['neither']}× bis Session-Ende offen. Im Schnitt {h['avgR']:+.2f} R.")
 
 
 def side_word(side):
@@ -465,13 +465,17 @@ def quality_html(h, big=True):
     win, label, cls = quality(h)
     be = round(BREAKEVEN * 100)
     if win is None or label == "zu wenig Daten":
-        return "<div class='q q-none'><span class='qlabel'>Zu wenig vergangene Fälle für eine Quote</span></div>"
+        return "<div class='q q-none'><span class='qlabel'>Zu wenig vergangene Fälle für eine TP-Quote</span></div>"
     w = round(win * 100)
+    sl = round(h["stop"] / h["n"] * 100)
+    op = 100 - w - sl
     return (f"<div class='q {cls}'><div class='qrow'><span class='qnum'>{w}<small>%</small></span>"
-            f"<span class='qtext'>Trefferquote<br><b>{label}</b></span></div>"
-            f"<div class='meter' role='img' aria-label='{w} Prozent, Ausgleich bei {be} Prozent'>"
-            f"<span style='width:{min(w, 100)}%'></span><i style='left:{be}%'></i></div>"
-            f"<div class='qfoot'>Ausgleich bei {be} %</div></div>")
+            f"<span class='qtext'>geht in den <b>TP</b><br>Stärke: <b>{label}</b></span></div>"
+            f"<div class='meter3' role='img' aria-label='{w} Prozent TP, {sl} Prozent SL, Ausgleich bei {be} Prozent'>"
+            f"<span class='m-tp' style='width:{w}%'></span><span class='m-op' style='width:{op}%'></span>"
+            f"<span class='m-sl' style='width:{sl}%'></span><i style='left:{be}%'></i></div>"
+            f"<div class='qfoot'><span class='k-tp'>TP {w} %</span><span class='k-sl'>SL {sl} %</span>"
+            f"{f'<span>offen bis Schluss {op} %</span>' if op else ''}<span>Ausgleich ab {be} % TP</span></div></div>")
 
 
 def strip(lo, hi, last, stop=None, entry=None, target=None, side=0, w=320, h=54):
@@ -493,8 +497,8 @@ def strip(lo, hi, last, stop=None, entry=None, target=None, side=0, w=320, h=54)
         x1, x2 = sorted((x(entry), x(last)))
         parts.append(f"<rect x='{x1:.1f}' y='{y - 3}' width='{max(x2 - x1, 1):.1f}' height='6' rx='3' "
                      f"class='{'run-up' if good else 'run-down'}'/>")
-        for v, cls, t in ((stop, "tick-stop", "Stop"), (entry, "tick-entry", "Einstieg"),
-                          (target, "tick-target", "Ziel")):
+        for v, cls, t in ((stop, "tick-stop", "SL"), (entry, "tick-entry", "Einstieg"),
+                          (target, "tick-target", "TP")):
             parts.append(f"<line x1='{x(v):.1f}' y1='{y - 16}' x2='{x(v):.1f}' y2='{y + 16}' class='{cls}'/>"
                          f"<text x='{x(v):.1f}' y='{y - 20}' class='lab {cls}'>{t}</text>")
     parts.append(f"<circle cx='{x(last):.1f}' cy='{y}' r='5.5' class='now'/>")
@@ -517,9 +521,9 @@ def card(r):
   </header>
   {strip(r['lo'], r['hi'], r['price'], r['stop'], r['entry'], r['target'], r['side'])}
   <dl class="lv">
-    <div><dt>Stop</dt><dd>{fmt(r['stop'], d)}</dd><dd class="sub">{pct(r['stop'], r['entry'])}</dd></div>
+    <div><dt>SL</dt><dd>{fmt(r['stop'], d)}</dd><dd class="sub">{pct(r['stop'], r['entry'])}</dd></div>
     <div><dt>Einstieg</dt><dd>{fmt(r['entry'], d)}</dd><dd class="sub">&nbsp;</dd></div>
-    <div><dt>Ziel</dt><dd>{fmt(r['target'], d)}</dd><dd class="sub">{pct(r['target'], r['entry'])}</dd></div>
+    <div><dt>TP</dt><dd>{fmt(r['target'], d)}</dd><dd class="sub">{pct(r['target'], r['entry'])}</dd></div>
     <div><dt>Jetzt</dt><dd>{fmt(r['price'], d)}</dd><dd class="sub">{r['R']:+.2f} R</dd></div>
   </dl>
   {quality_html(h)}
@@ -605,8 +609,8 @@ def qcell(h):
     if not h or not h["n"]:
         return "<span class='qc q-none'>–</span>"
     win, label, cls = quality(h)
-    return (f"<span class='qc {cls}'><b>{round(win * 100)} %</b> {label}</span>"
-            f"<small>{h['n']} Fälle, Ø {h['avgR']:+.2f} R</small>")
+    return (f"<span class='qc {cls}'><b>{round(win * 100)} % TP</b> {label}</span>"
+            f"<small>SL {round(h['stop'] / h['n'] * 100)} %, {h['n']} Fälle</small>")
 
 
 def row_html(r):
@@ -614,14 +618,14 @@ def row_html(r):
     rng = f"{fmt(r['lo'], d)} – {fmt(r['hi'], d)}" if "hi" in r else "–"
     lvl = "–"
     if "target" in r:
-        lvl = (f"<span class='lv3'><span>S {fmt(r['stop'], d)}</span><span>E {fmt(r['entry'], d)}</span>"
-               f"<span>Z {fmt(r['target'], d)}</span></span>")
+        lvl = (f"<span class='lv3'><span>SL {fmt(r['stop'], d)}</span><span>E {fmt(r['entry'], d)}</span>"
+               f"<span>TP {fmt(r['target'], d)}</span></span>")
     h = r.get("hist") or {1: dict(n=0), -1: dict(n=0)}
     return (f"<tr class='st-{r.get('status', 'error')}'><th scope='row'>{esc(r['name'])}</th>"
             f"<td data-l='Status'>{status_cell(r)}</td>"
             f"<td class='num{' e' if rng == '–' else ''}' data-l='Spanne'>{rng}</td>"
-            f"<td class='num lvc{' e' if lvl == '–' else ''}' data-l='Stop, Einstieg, Ziel'>{lvl}</td>"
-            f"<td data-l='Long-Quote'>{qcell(h[1])}</td><td data-l='Short-Quote'>{qcell(h[-1])}</td></tr>")
+            f"<td class='num lvc{' e' if lvl == '–' else ''}' data-l='SL, Einstieg, TP'>{lvl}</td>"
+            f"<td data-l='Long: TP-Quote'>{qcell(h[1])}</td><td data-l='Short: TP-Quote'>{qcell(h[-1])}</td></tr>")
 
 
 def timeline(rows, now):
@@ -650,7 +654,7 @@ def timeline(rows, now):
 
 def wr(r, side):
     win, label, _ = quality(r["hist"][side])
-    return "–" if win is None else f"{round(win * 100)} % {label}"
+    return "–" if win is None else f"{round(win * 100)} % TP ({label})"
 
 
 def render(rows, best, waiting, errors, now):
@@ -694,7 +698,7 @@ def render(rows, best, waiting, errors, now):
 <summary><h2>{esc(s['name'].replace(' ', '-'))}-Session</h2><span>Start {ch_time(t0) if t0 else ''} Uhr, {len(rs)} Märkte</span></summary>
 <div class="scroll"><table>
 <thead><tr><th scope="col">Markt</th><th scope="col">Status</th><th scope="col">Spanne</th>
-<th scope="col">Stop, Einstieg, Ziel</th><th scope="col">Long-Quote</th><th scope="col">Short-Quote</th></tr></thead>
+<th scope="col">SL, Einstieg, TP</th><th scope="col">Long: TP-Quote</th><th scope="col">Short: TP-Quote</th></tr></thead>
 <tbody>{body}</tbody></table></div>
 </details>"""
 
@@ -797,7 +801,13 @@ section {{ margin-bottom:38px }}
 .q-strong .meter span, .q-good .meter span {{ background:var(--long) }}
 .q-weak .meter span {{ background:var(--short) }}
 .meter i {{ position:absolute; top:-4px; bottom:-4px; width:2px; background:var(--ink) }}
-.qfoot {{ font-size:12px; color:var(--muted) }}
+.meter3 {{ position:relative; display:flex; height:10px; background:var(--bg); border-radius:5px; margin:8px 0 4px; overflow:visible }}
+.meter3 span {{ height:100% }}
+.m-tp {{ background:var(--long); border-radius:5px 0 0 5px }} .m-sl {{ background:var(--short); border-radius:0 5px 5px 0 }}
+.m-op {{ background:var(--line) }}
+.meter3 i {{ position:absolute; top:-4px; bottom:-4px; width:2px; background:var(--ink) }}
+.qfoot {{ display:flex; flex-wrap:wrap; gap:2px 12px; font-size:12.5px; color:var(--muted) }}
+.qfoot .k-tp {{ color:var(--long); font-weight:600 }} .qfoot .k-sl {{ color:var(--short); font-weight:600 }}
 .qlabel {{ font-size:14px; color:var(--muted) }}
 .hist {{ margin:8px 0 0; font-size:13px; color:var(--muted) }}
 .note {{ margin:4px 0 0; font-size:13px; color:var(--muted) }}
@@ -948,8 +958,9 @@ aus den letzten ~60 Tagen: an Tagen, an denen um diese Uhrzeit auch noch kein Au
 darüber, entsteht ein Long-Signal, darunter ein Short-Signal. Der Stop liegt in der Mitte des Bandes, das Ziel
 {TARGET_R:g}× so weit vom Einstieg wie der Stop. R ist das Vielfache des Risikos: +{TARGET_R:g} R heisst Ziel erreicht,
 −1 R heisst Stop.</p>
-<p>Die <b>Trefferquote</b> sagt, wie oft dieselbe Regel beim gleichen Markt in den letzten ~60 Tagen zuerst das Ziel
-erreicht hat. Weil ein Treffer zwei Stops ausgleicht, reichen {be} % (der Strich im Balken).
+<p>Die <b>TP-Quote</b> sagt, wie oft dasselbe Signal beim gleichen Markt in den letzten ~60 Tagen zuerst den TP
+(das Ziel) erreicht hat. Der rote Teil im Balken ist der Anteil, der zuerst in den SL lief, der graue blieb bis
+Session-Ende offen. Weil ein Treffer zwei Stops ausgleicht, reichen {be} % (der Strich im Balken).
 <b>Stark</b> heisst mindestens 15 Punkte darüber, <b>gut</b> 5 bis 15 darüber, <b>Münzwurf</b> weniger als 5 daneben,
 <b>schwach</b> mehr als 5 darunter. Unter {MIN_HISTORY} Fällen gibt es keine Quote. Gebühren und Spread sind nicht
 eingerechnet.</p>
@@ -1244,7 +1255,7 @@ def bot_sim():
                 liq += 1
             else:
                 pnl = max(-stake, size * t["ret"] - size * _cost(t["sym"]))
-                how = "Ziel" if t["R"] >= TARGET_R else ("Stop" if t["R"] <= -1 else "Session-Ende")
+                how = "TP" if t["R"] >= TARGET_R else ("SL" if t["R"] <= -1 else "Session-Ende")
             n += 1
             wins += pnl > 0
             total += pnl

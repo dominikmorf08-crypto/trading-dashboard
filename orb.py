@@ -1262,14 +1262,20 @@ def bot_sim():
             log.append(dict(ts=t["entry_ts"], sym=t["sym"], side=t["side"], label=t["label"],
                             stake=stake, pnl=pnl, how=how))
         eq = max(0.0, eq + total)
-        curve.append((max(t["exit_ts"] for t in picks), eq))
+        end_ts = max(t["exit_ts"] for t in picks)
+        curve.append((end_ts, eq))
         peak = max(peak, eq)
         if peak:
             maxdd = max(maxdd, (peak - eq) / peak)
-        if eq < 0.01:
-            eq = 0.0
+        if eq < 1:                    # unter 1 Franken kann der Bot nicht mehr sinnvoll handeln
+            eq, bust_ts = 0.0, end_ts
             break
-    return dict(eq=eq, curve=curve, log=log, n=n, wins=wins, liq=liq, maxdd=maxdd, sessions=len(keys))
+    else:
+        bust_ts = None
+    if not keys:
+        bust_ts = None
+    return dict(eq=eq, curve=curve, log=log, n=n, wins=wins, liq=liq, maxdd=maxdd, sessions=len(keys),
+                bust_ts=bust_ts, first_ts=curve[0][0] if curve else None)
 
 
 def bot_today(rows, eq):
@@ -1352,10 +1358,15 @@ def render_bot(sim, today):
         td += (f"<li><span>{ch_time(r['trig_ts'])}</span><b>{esc(r['name'])}</b>"
                f"<span>{side_word(r['side'])}, {esc(st)}, {x['label']}</span>"
                f"<em class='{'pos' if x['pnl'] > 0 else 'neg'}'>{'+' if x['pnl'] > 0 else '−'}{chf(abs(x['pnl']))}</em></li>")
+    if sim.get("bust_ts"):
+        td = ""
     today_html = (f"<ul class='blog'>{td}</ul>" if td else
                   "<p class='empty'>Heute hat der Bot noch nichts gekauft. Er wartet auf die ersten Signale mit "
                   "„stark“ oder „gut“.</p>")
-    busted = "<p class='bust'>Das Konto ist leer. Ab hier hätte der Bot nicht mehr handeln können.</p>" if eq == 0 else ""
+    busted = ""
+    if sim.get("bust_ts"):
+        busted = (f"<p class='bust'>Am {local(sim['bust_ts'], 'ch').strftime('%d.%m.%Y')} war das Konto leer "
+                  f"(unter 1). Ab da hätte der Bot nicht mehr handeln können.</p>")
     return f"""
 <section class="bot" id="bot">
 <div class="sec"><h2>Bot-Simulator</h2>

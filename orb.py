@@ -408,210 +408,390 @@ def quality(h):
 
 def hist_text(h):
     if not h["n"]:
-        return "keine"
-    return (f"{h['n']}× · Ziel {h['target']} · Stop {h['stop']} · "
-            f"offen {h['neither']} · Ø {h['avgR']:+.2f} R")
+        return "Noch keine vergangenen Fälle."
+    return (f"Letzte ~60 Tage: {h['n']} Fälle, {h['target']}× Ziel, {h['stop']}× Stop, "
+            f"{h['neither']}× offen, im Schnitt {h['avgR']:+.2f} R.")
 
 
-def quality_html(h):
+def side_word(side):
+    return "Long" if side > 0 else "Short"
+
+
+def side_arrow(side):
+    return "↗" if side > 0 else "↘"
+
+
+def sess(key):
+    return next(x for x in SESSIONS if x["key"] == key)
+
+
+def quality_html(h, big=True):
     win, label, cls = quality(h)
-    if win is None:
-        return "<p class='quality q-none'>Trefferquote: zu wenig Daten</p>"
-    w = round(win * 100)
     be = round(BREAKEVEN * 100)
-    return (f"<div class='quality {cls}'><div class='qtop'><b>{w} %</b> Trefferquote "
-            f"<span class='badge'>{label}</span></div>"
-            f"<div class='bar'><span style='width:{w}%'></span><i style='left:{be}%'></i></div>"
-            f"<small>nötig zum Ausgleich: {be} % (Ziel {TARGET_R:g} R)</small></div>")
+    if win is None or label == "zu wenig Daten":
+        return "<div class='q q-none'><span class='qlabel'>Zu wenig vergangene Fälle für eine Quote</span></div>"
+    w = round(win * 100)
+    return (f"<div class='q {cls}'><div class='qrow'><span class='qnum'>{w}<small>%</small></span>"
+            f"<span class='qtext'>Trefferquote<br><b>{label}</b></span></div>"
+            f"<div class='meter' role='img' aria-label='{w} Prozent, Ausgleich bei {be} Prozent'>"
+            f"<span style='width:{min(w, 100)}%'></span><i style='left:{be}%'></i></div>"
+            f"<div class='qfoot'>Ausgleich bei {be} %</div></div>")
 
 
-def side_label(side):
-    return "LONG ▲" if side > 0 else "SHORT ▼"
+def strip(lo, hi, last, stop=None, entry=None, target=None, side=0, w=320, h=54):
+    """Kleine Preisleiter: Eroeffnungsspanne (Band), Stop, Einstieg, Ziel, Kurs jetzt."""
+    vals = [v for v in (lo, hi, last, stop, entry, target) if v is not None]
+    a, b = min(vals), max(vals)
+    pad = (b - a) * 0.06 or a * 0.001
+    a, b = a - pad, b + pad
+
+    def x(v):
+        return 8 + (v - a) / (b - a) * (w - 16)
+
+    y = 30
+    parts = [f"<svg class='strip' viewBox='0 0 {w} {h}' aria-hidden='true'>",
+             f"<line x1='8' y1='{y}' x2='{w - 8}' y2='{y}' class='axis'/>",
+             f"<rect x='{x(lo):.1f}' y='{y - 11}' width='{max(x(hi) - x(lo), 2):.1f}' height='22' rx='3' class='band'/>"]
+    if entry is not None:
+        good = side * (last - entry) >= 0
+        x1, x2 = sorted((x(entry), x(last)))
+        parts.append(f"<rect x='{x1:.1f}' y='{y - 3}' width='{max(x2 - x1, 1):.1f}' height='6' rx='3' "
+                     f"class='{'run-up' if good else 'run-down'}'/>")
+        for v, cls, t in ((stop, "tick-stop", "Stop"), (entry, "tick-entry", "Einstieg"),
+                          (target, "tick-target", "Ziel")):
+            parts.append(f"<line x1='{x(v):.1f}' y1='{y - 16}' x2='{x(v):.1f}' y2='{y + 16}' class='{cls}'/>"
+                         f"<text x='{x(v):.1f}' y='{y - 20}' class='lab {cls}'>{t}</text>")
+    parts.append(f"<circle cx='{x(last):.1f}' cy='{y}' r='5.5' class='now'/>")
+    parts.append("</svg>")
+    return "".join(parts)
 
 
 def card(r):
     d = r["dec"]
-    s = next(x for x in SESSIONS if x["key"] == r["session"])
+    s = sess(r["session"])
     h = r["hist"][r["side"]]
     cls = "long" if r["side"] > 0 else "short"
+    note = f"<p class='note'>{esc(r['note'])}.</p>" if r["note"] else ""
     return f"""
-<article class="card {cls}">
-  <header><span class="side">{side_label(r['side'])}</span>
-  <h3>{esc(r['name'])}</h3><span class="muted">{esc(s['name'])} · seit {ch_time(r['trig_ts'])}</span></header>
-  <dl>
-    <div><dt>Einstieg</dt><dd>{fmt(r['entry'], d)}</dd></div>
-    <div><dt>Stop</dt><dd>{fmt(r['stop'], d)} <small>{pct(r['stop'], r['entry'])}</small></dd></div>
-    <div><dt>Ziel ({TARGET_R:g} R)</dt><dd>{fmt(r['target'], d)} <small>{pct(r['target'], r['entry'])}</small></dd></div>
-    <div><dt>Jetzt</dt><dd>{fmt(r['price'], d)} <small>{r['R']:+.2f} R</small></dd></div>
+<article class="sig {cls}">
+  <header>
+    <div><h3>{esc(r['name'])}</h3>
+    <p class="meta">{esc(s['name'].replace(' ', '-'))}-Session, ausgelöst {ch_time(r['trig_ts'])}</p></div>
+    <span class="dir">{side_arrow(r['side'])} {side_word(r['side'])}</span>
+  </header>
+  {strip(r['lo'], r['hi'], r['price'], r['stop'], r['entry'], r['target'], r['side'])}
+  <dl class="lv">
+    <div><dt>Stop</dt><dd>{fmt(r['stop'], d)}</dd><dd class="sub">{pct(r['stop'], r['entry'])}</dd></div>
+    <div><dt>Einstieg</dt><dd>{fmt(r['entry'], d)}</dd><dd class="sub">&nbsp;</dd></div>
+    <div><dt>Ziel</dt><dd>{fmt(r['target'], d)}</dd><dd class="sub">{pct(r['target'], r['entry'])}</dd></div>
+    <div><dt>Jetzt</dt><dd>{fmt(r['price'], d)}</dd><dd class="sub">{r['R']:+.2f} R</dd></div>
   </dl>
   {quality_html(h)}
-  <p class="hist">Gleiche Regel, letzte ~60 Tage: {hist_text(h)}</p>
-  {f'<p class="note">{esc(r["note"])}</p>' if r['note'] else ''}
+  <p class="hist">{hist_text(h)}</p>
+  {note}
 </article>"""
+
+
+def status_cell(r):
+    st = r.get("status", "error")
+    label = STATUS.get(st, st)
+    extra, dot = "", "idle"
+    if st == "pending":
+        extra = f"startet {ch_time(r['t0'])}"
+    elif st == "forming":
+        extra, dot = f"steht um {ch_time(r['t_or'])}", "wait"
+    elif st == "waiting":
+        extra, dot = f"bis {ch_time(r['t_last'])}, jetzt {fmt(r['last'], r['dec'])}", "wait"
+    elif st in ("open", "target", "stop", "closed"):
+        label = f"{side_word(r['side'])}: {label}"
+        extra = f"seit {ch_time(r['trig_ts'])}"
+        if "R" in r:
+            extra += f", {r['R']:+.2f} R"
+        dot = {"open": "live", "target": "win", "stop": "loss"}.get(st, "idle")
+    return (f"<span class='st'><i class='dot {dot}'></i>{esc(label)}</span>"
+            f"<small>{esc(extra)}</small>")
+
+
+def qcell(h):
+    if not h or not h["n"]:
+        return "<span class='qc q-none'>–</span>"
+    win, label, cls = quality(h)
+    return (f"<span class='qc {cls}'><b>{round(win * 100)} %</b> {label}</span>"
+            f"<small>{h['n']} Fälle, Ø {h['avgR']:+.2f} R</small>")
 
 
 def row_html(r):
     d = r["dec"]
-    st = r.get("status", "error")
-    label = STATUS.get(st, st)
-    extra = ""
-    if st == "pending":
-        extra = f"Start {ch_time(r['t0'])}"
-    elif st == "forming":
-        extra = f"fertig {ch_time(r['t_or'])}"
-    elif st == "waiting":
-        extra = (f"Hoch {pct(r['hi'], r['last'])} · Tief {pct(r['lo'], r['last'])} "
-                 f"· bis {ch_time(r['t_last'])}")
-    elif st in ("open", "target", "stop", "closed"):
-        label = f"{side_label(r['side'])} {label}"
-        extra = f"seit {ch_time(r['trig_ts'])}"
-        if "R" in r:
-            extra += f" · {r['R']:+.2f} R"
-    rng = (f"{fmt(r['lo'], d)} – {fmt(r['hi'], d)}" if "hi" in r else "–")
+    rng = f"{fmt(r['lo'], d)} – {fmt(r['hi'], d)}" if "hi" in r else "–"
     lvl = "–"
     if "target" in r:
-        lvl = (f"E {fmt(r['entry'], d)}<br>S {fmt(r['stop'], d)}<br>"
-               f"Z {fmt(r['target'], d)}")
+        lvl = (f"<span class='lv3'><span>S {fmt(r['stop'], d)}</span><span>E {fmt(r['entry'], d)}</span>"
+               f"<span>Z {fmt(r['target'], d)}</span></span>")
     h = r.get("hist") or {1: dict(n=0), -1: dict(n=0)}
+    return (f"<tr class='st-{r.get('status', 'error')}'><th scope='row'>{esc(r['name'])}</th>"
+            f"<td>{status_cell(r)}</td><td class='num'>{rng}</td><td class='num'>{lvl}</td>"
+            f"<td>{qcell(h[1])}</td><td>{qcell(h[-1])}</td></tr>")
 
-    def hs(side):
-        x = h[side]
-        if not x["n"]:
-            return "–"
-        win, label, cls = quality(x)
-        return (f"<span class='{cls}'><b>{round(win * 100)} %</b> {label}</span><br>"
-                f"<small class='muted'>{x['n']}× · Ø {x['avgR']:+.2f} R</small>")
 
-    return (f"<tr class='st-{st}'><td><b>{esc(r['name'])}</b><br>"
-            f"<small class='muted'>{esc(r['group'])}</small></td>"
-            f"<td>{esc(label)}<br><small class='muted'>{esc(extra)}</small></td>"
-            f"<td>{rng}</td><td>{lvl}</td>"
-            f"<td>{hs(1)}</td><td>{hs(-1)}</td></tr>")
+def timeline(rows, now):
+    """Tagesleiste 07:00-23:00 Schweizer Zeit mit beiden Sessions und der Uhrzeit jetzt."""
+    day0 = local(now, "ch").replace(hour=7, minute=0, second=0, microsecond=0)
+    span = 16 * 60
+
+    def pos(ts):
+        m = (local(ts, "ch") - day0).total_seconds() / 60
+        return max(0.0, min(100.0, m / span * 100))
+
+    bands = ""
+    for s in SESSIONS:
+        r = next((x for x in rows if x["session"] == s["key"] and "t0" in x), None)
+        if not r:
+            continue
+        a, o, b = pos(r["t0"]), pos(r["t_or"]), pos(r["t_end"])
+        bands += (f"<div class='band-s {s['key']}' style='left:{a:.2f}%;width:{b - a:.2f}%'>"
+                  f"<span class='orw' style='width:{(o - a) / (b - a) * 100:.2f}%'></span>"
+                  f"<em>{esc(s['name'])} {ch_time(r['t0'])}–{ch_time(r['t_end'])}</em></div>")
+    ticks = "".join(f"<span style='left:{(hh - 7) / 16 * 100:.2f}%'>{hh}</span>" for hh in range(8, 23, 2))
+    return (f"<div class='tl' aria-label='Handelstag in Schweizer Zeit'><div class='tl-track'>{bands}"
+            f"<div class='tl-now' style='left:{pos(now):.2f}%'><b>{local(now, 'ch').strftime('%H:%M')}</b></div>"
+            f"</div><div class='tl-ticks'>{ticks}</div></div>")
 
 
 def wr(r, side):
     win, label, _ = quality(r["hist"][side])
-    return "–" if win is None else f"{round(win * 100)} % ({label})"
+    return "–" if win is None else f"{round(win * 100)} % {label}"
 
 
 def render(rows, best, waiting, errors, now):
-    stamp = local(now, "ch").strftime("%d.%m.%Y %H:%M")
+    stamp = local(now, "ch")
+    days = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
+    when = f"{days[stamp.weekday()]}, {stamp.strftime('%d.%m.%Y')}, Stand {stamp.strftime('%H:%M')} Uhr"
+    n_open = sum(1 for r in rows if r.get("status") == "open")
+
     if best:
-        best_html = "<div class='cards'>" + "".join(card(r) for r in best[:6]) + "</div>"
+        best_html = "<div class='sigs'>" + "".join(card(r) for r in best[:6]) + "</div>"
     else:
-        best_html = ("<p class='empty'>Gerade kein frisches Signal, dessen Regel in den "
-                     "letzten ~60 Tagen im Schnitt positiv war.</p>")
+        best_html = ("<p class='empty'>Gerade gibt es kein frisches Signal mit guter Vorgeschichte. "
+                     "Die Seite prüft alle 5 Minuten neu, ab 09:15 (London) und 15:45 (New York) "
+                     "kommen neue Signale.</p>")
+
     if waiting:
-        wl = "".join(
-            f"<li><b>{esc(r['name'])}</b> ({esc(next(s['name'] for s in SESSIONS if s['key'] == r['session']))}): "
-            f"Spanne {fmt(r['lo'], r['dec'])} – {fmt(r['hi'], r['dec'])}, jetzt {fmt(r['last'], r['dec'])}"
-            f" <span class='muted'>· Trefferquote Long {wr(r, 1)} / Short {wr(r, -1)}</span></li>"
-            for r in waiting[:8])
-        wait_html = f"<ul class='wait'>{wl}</ul>"
+        items = ""
+        for r in waiting[:8]:
+            items += (f"<li><div class='w-name'><b>{esc(r['name'])}</b>"
+                      f"<span>{esc(sess(r['session'])['name'])}, Spanne {fmt(r['lo'], r['dec'])} – "
+                      f"{fmt(r['hi'], r['dec'])}</span></div>"
+                      f"{strip(r['lo'], r['hi'], r['last'], w=240, h=40)}"
+                      f"<div class='w-q'><span>Long {wr(r, 1)}</span><span>Short {wr(r, -1)}</span></div></li>")
+        wait_html = f"<ul class='waits'>{items}</ul>"
     else:
-        wait_html = "<p class='empty'>Keine.</p>"
+        wait_html = "<p class='empty'>Kein Markt mit guter Vorgeschichte wartet gerade auf einen Ausbruch.</p>"
 
     tables = ""
     for s in SESSIONS:
         rs = [r for r in rows if r["session"] == s["key"]]
+        live = any(r.get("status") in ("pending", "forming", "waiting", "open") for r in rs)
         t0 = next((r["t0"] for r in rs if "t0" in r), None)
-        start = ch_time(t0) if t0 else ""
+        body = ""
+        for g in dict.fromkeys(r["group"] for r in rs):
+            body += f"<tr class='grp'><th colspan='6' scope='rowgroup'>{esc(g)}</th></tr>"
+            body += "".join(row_html(r) for r in rs if r["group"] == g)
         tables += f"""
-<section>
-<h2>{esc(s['name'])}-Session <span class="muted">Start {start} Schweizer Zeit</span></h2>
+<details class="sess" {'open' if live else ''}>
+<summary><h2>{esc(s['name'].replace(' ', '-'))}-Session</h2><span>Start {ch_time(t0) if t0 else ''} Uhr, {len(rs)} Märkte</span></summary>
 <div class="scroll"><table>
-<thead><tr><th>Markt</th><th>Status</th><th>Spanne (15 Min.)</th><th>Einstieg / Stop / Ziel</th>
-<th>Trefferquote Long</th><th>Trefferquote Short</th></tr></thead>
-<tbody>{''.join(row_html(r) for r in rs)}</tbody></table></div>
-</section>"""
+<thead><tr><th scope="col">Markt</th><th scope="col">Status</th><th scope="col">Spanne</th>
+<th scope="col">Stop, Einstieg, Ziel</th><th scope="col">Long-Quote</th><th scope="col">Short-Quote</th></tr></thead>
+<tbody>{body}</tbody></table></div>
+</details>"""
 
     err_html = ""
     if errors:
-        err_html = ("<p class='note'>Nicht abrufbar: " +
-                    esc("; ".join(e.split(":")[0] for e in errors)) + "</p>")
+        err_html = ("<p class='empty'>Diese Märkte konnten nicht geladen werden und fehlen: " +
+                    esc(", ".join(e.split(":")[0] for e in errors)) + ". Beim nächsten Lauf wird es neu versucht.</p>")
 
+    be = round(BREAKEVEN * 100)
     return f"""<!doctype html>
 <html lang="de"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="refresh" content="120">
-<title>Breakout-Dashboard</title>
+<title>Breakout-Board</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@500;600;700&family=Barlow:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
-:root {{ --bg:#f6f5f2; --panel:#ffffff; --text:#1d1d1b; --muted:#6b6a66; --line:#e3e1dc;
-  --long:#1f7a4d; --long-bg:#e6f3ec; --short:#b4352b; --short-bg:#f8e9e7; --accent:#2c5d8f; }}
+:root {{
+  --bg:#EEF1F5; --surface:#FFFFFF; --ink:#15233B; --muted:#5D6B80; --line:#D5DCE6;
+  --long:#0E8A6A; --long-soft:#DDF2EA; --short:#C8364B; --short-soft:#F8E1E5;
+  --range:#E4A11B; --range-soft:rgba(228,161,27,.22); --flip:#7A8699;
+}}
 @media (prefers-color-scheme: dark) {{ :root:not([data-theme="light"]) {{
-  --bg:#141413; --panel:#1f1f1d; --text:#ecebe6; --muted:#9c9a93; --line:#33322f;
-  --long:#5cc08a; --long-bg:#18301f; --short:#ec7b70; --short-bg:#3a1d1a; --accent:#7fb0e0; }} }}
-:root[data-theme="dark"] {{ --bg:#141413; --panel:#1f1f1d; --text:#ecebe6; --muted:#9c9a93; --line:#33322f;
-  --long:#5cc08a; --long-bg:#18301f; --short:#ec7b70; --short-bg:#3a1d1a; --accent:#7fb0e0; }}
+  --bg:#0E1625; --surface:#16223A; --ink:#E4EAF3; --muted:#8D9AB0; --line:#26344D;
+  --long:#3DCB9E; --long-soft:#123A32; --short:#F0667A; --short-soft:#3F1C26;
+  --range:#F2B544; --range-soft:rgba(242,181,68,.2); --flip:#8D9AB0; }} }}
+:root[data-theme="dark"] {{ --bg:#0E1625; --surface:#16223A; --ink:#E4EAF3; --muted:#8D9AB0; --line:#26344D;
+  --long:#3DCB9E; --long-soft:#123A32; --short:#F0667A; --short-soft:#3F1C26;
+  --range:#F2B544; --range-soft:rgba(242,181,68,.2); --flip:#8D9AB0; }}
 * {{ box-sizing:border-box }}
-body {{ margin:0; background:var(--bg); color:var(--text);
-  font:15px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif; }}
-main {{ max-width:1100px; margin:0 auto; padding:20px 16px 48px }}
-h1 {{ font-size:22px; margin:0 0 4px }} h2 {{ font-size:17px; margin:28px 0 10px }}
-.muted {{ color:var(--muted); font-weight:400 }} small {{ font-size:12px }}
-.cards {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(250px,1fr)); gap:12px }}
-.card {{ background:var(--panel); border:1px solid var(--line); border-left:4px solid var(--accent);
-  border-radius:10px; padding:12px 14px }}
-.card.long {{ border-left-color:var(--long) }} .card.short {{ border-left-color:var(--short) }}
-.card h3 {{ margin:2px 0; font-size:17px }} .card header .muted {{ font-size:13px }}
-.side {{ font-size:12px; font-weight:700; letter-spacing:.04em }}
-.long .side {{ color:var(--long) }} .short .side {{ color:var(--short) }}
-dl {{ display:grid; grid-template-columns:1fr 1fr; gap:6px 12px; margin:10px 0 }}
-dt {{ font-size:12px; color:var(--muted) }} dd {{ margin:0; font-variant-numeric:tabular-nums; font-weight:600 }}
-dd small {{ font-weight:400; color:var(--muted); white-space:nowrap }}
-.hist {{ font-size:12px; color:var(--muted); margin:6px 0 0 }}
-.note {{ font-size:12px; color:var(--muted); margin:4px 0 0 }}
-.empty {{ background:var(--panel); border:1px dashed var(--line); border-radius:10px; padding:12px }}
-.wait {{ background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:10px 10px 10px 30px; margin:0 }}
-.wait li {{ margin:3px 0 }}
-.scroll {{ overflow-x:auto; background:var(--panel); border:1px solid var(--line); border-radius:10px }}
-table {{ border-collapse:collapse; width:100%; min-width:760px; font-variant-numeric:tabular-nums }}
-th,td {{ text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:top; font-size:14px }}
-th {{ font-size:12px; color:var(--muted); font-weight:600 }}
-tr.st-open td {{ background:var(--long-bg) }}
-tr.st-stop td:nth-child(2) {{ color:var(--short) }} tr.st-target td:nth-child(2) {{ color:var(--long) }}
-.quality {{ margin:8px 0 4px }} .qtop {{ display:flex; align-items:center; gap:6px; flex-wrap:wrap }}
-.qtop b {{ font-size:20px }}
-.badge {{ font-size:11px; font-weight:700; padding:2px 7px; border-radius:99px; background:var(--line) }}
-.bar {{ position:relative; height:6px; background:var(--line); border-radius:3px; margin:6px 0 3px }}
-.bar span {{ position:absolute; left:0; top:0; bottom:0; border-radius:3px; background:var(--muted) }}
-.bar i {{ position:absolute; top:-3px; bottom:-3px; width:2px; background:var(--text) }}
-.q-strong .badge, .q-strong .bar span {{ background:var(--long); color:#fff }}
-.q-good .badge, .q-good .bar span {{ background:var(--long-bg); color:var(--long) }} .q-good .bar span {{ background:var(--long) }}
-.q-flip .badge {{ background:var(--line) }}
-.q-weak .badge, .q-weak .bar span {{ background:var(--short-bg); color:var(--short) }} .q-weak .bar span {{ background:var(--short) }}
-td .q-strong b, td .q-good b {{ color:var(--long) }} td .q-weak b {{ color:var(--short) }}
-.disclaimer {{ margin-top:32px; font-size:13px; color:var(--muted); border-top:1px solid var(--line); padding-top:12px }}
+html {{ -webkit-text-size-adjust:100% }}
+body {{ margin:0; background:var(--bg); color:var(--ink); font:16px/1.5 Barlow,system-ui,sans-serif }}
+main {{ max-width:1120px; margin:0 auto; padding:28px 16px 56px }}
+h1,h2,h3,.qnum,.dir,.lv dd,.tl-now b {{ font-family:"Barlow Semi Condensed",Barlow,sans-serif }}
+.num, .lv dd, .qnum, td small {{ font-variant-numeric:tabular-nums }}
+
+.top {{ display:flex; flex-wrap:wrap; align-items:flex-end; justify-content:space-between; gap:8px 24px; margin-bottom:18px }}
+h1 {{ font-size:44px; line-height:1; margin:0; font-weight:700; letter-spacing:-.01em }}
+.top p {{ margin:0; color:var(--muted) }}
+.count {{ font-family:"Barlow Semi Condensed",sans-serif; font-size:18px; color:var(--ink) }}
+.count b {{ color:var(--long) }}
+
+.tl {{ margin:6px 0 34px }}
+.tl-track {{ position:relative; height:46px; background:var(--surface); border:1px solid var(--line); border-radius:8px }}
+.band-s {{ position:absolute; top:7px; height:14px; border-radius:4px; background:var(--line) }}
+.band-s.ny {{ top:25px }}
+.band-s .orw {{ position:absolute; left:0; top:0; bottom:0; background:var(--range); border-radius:4px 0 0 4px }}
+.band-s em {{ position:absolute; left:6px; top:-1px; font-style:normal; font-size:11.5px; line-height:16px; color:var(--ink); white-space:nowrap; padding-left:8px }}
+.tl-now {{ position:absolute; top:-6px; bottom:-6px; width:2px; background:var(--ink) }}
+.tl-now b {{ position:absolute; top:-20px; left:50%; transform:translateX(-50%); font-size:13px; background:var(--ink); color:var(--bg); padding:0 5px; border-radius:3px }}
+.tl-ticks {{ position:relative; height:18px; color:var(--muted); font-size:12px }}
+.tl-ticks span {{ position:absolute; transform:translateX(-50%); top:2px }}
+
+h2 {{ font-size:26px; margin:0; font-weight:600 }}
+.sec {{ margin:0 0 12px }} .sec p {{ margin:2px 0 0; color:var(--muted); max-width:72ch }}
+section {{ margin-bottom:38px }}
+
+.sigs {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); gap:14px }}
+.sig {{ background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:16px 16px 14px; position:relative; overflow:hidden }}
+.sig::before {{ content:""; position:absolute; left:0; top:0; bottom:0; width:5px; background:var(--long) }}
+.sig.short::before {{ background:var(--short) }}
+.sig header {{ display:flex; justify-content:space-between; align-items:flex-start; gap:10px }}
+.sig h3 {{ font-size:26px; line-height:1.05; margin:0; font-weight:700 }}
+.meta {{ margin:2px 0 0; color:var(--muted); font-size:14px }}
+.dir {{ font-size:17px; font-weight:700; padding:3px 10px; border-radius:6px; background:var(--long-soft); color:var(--long); white-space:nowrap }}
+.short .dir {{ background:var(--short-soft); color:var(--short) }}
+
+.strip {{ display:block; width:100%; height:auto; margin:10px 0 6px; overflow:visible }}
+.strip .axis {{ stroke:var(--line); stroke-width:2 }}
+.strip .band {{ fill:var(--range-soft); stroke:var(--range); stroke-width:1.5 }}
+.strip .run-up {{ fill:var(--long) }} .strip .run-down {{ fill:var(--short) }}
+.strip line.tick-stop {{ stroke:var(--short); stroke-width:2 }}
+.strip line.tick-target {{ stroke:var(--long); stroke-width:2 }}
+.strip line.tick-entry {{ stroke:var(--ink); stroke-width:2; stroke-dasharray:3 3 }}
+.strip .lab {{ font:600 11px Barlow,sans-serif; text-anchor:middle }}
+.strip text.tick-stop {{ fill:var(--short) }} .strip text.tick-target {{ fill:var(--long) }} .strip text.tick-entry {{ fill:var(--muted) }}
+.strip .now {{ fill:var(--surface); stroke:var(--ink); stroke-width:2.5 }}
+
+.lv {{ display:grid; grid-template-columns:repeat(4,1fr); gap:4px; margin:0 0 12px }}
+.lv dt {{ font-size:12.5px; color:var(--muted) }}
+.lv dd {{ margin:0; font-size:18px; font-weight:600; line-height:1.15; overflow-wrap:anywhere }}
+.lv dd.sub {{ font:500 12.5px Barlow,sans-serif; color:var(--muted) }}
+
+.q {{ border-top:1px solid var(--line); padding-top:10px }}
+.qrow {{ display:flex; align-items:center; gap:10px }}
+.qnum {{ font-size:40px; font-weight:700; line-height:1 }}
+.qnum small {{ font-size:22px; margin-left:1px }}
+.qtext {{ font-size:13.5px; line-height:1.25; color:var(--muted) }}
+.qtext b {{ font-size:16px }}
+.q-strong .qnum, .q-strong .qtext b {{ color:var(--long) }}
+.q-good .qtext b {{ color:var(--long) }}
+.q-weak .qnum, .q-weak .qtext b {{ color:var(--short) }}
+.q-flip .qtext b {{ color:var(--flip) }}
+.meter {{ position:relative; height:8px; background:var(--bg); border-radius:4px; margin:8px 0 3px }}
+.meter span {{ position:absolute; left:0; top:0; bottom:0; border-radius:4px; background:var(--flip) }}
+.q-strong .meter span, .q-good .meter span {{ background:var(--long) }}
+.q-weak .meter span {{ background:var(--short) }}
+.meter i {{ position:absolute; top:-4px; bottom:-4px; width:2px; background:var(--ink) }}
+.qfoot {{ font-size:12px; color:var(--muted) }}
+.qlabel {{ font-size:14px; color:var(--muted) }}
+.hist {{ margin:8px 0 0; font-size:13px; color:var(--muted) }}
+.note {{ margin:4px 0 0; font-size:13px; color:var(--muted) }}
+
+.empty {{ background:var(--surface); border:1px dashed var(--line); border-radius:12px; padding:14px 16px; margin:0; color:var(--muted) }}
+
+.waits {{ list-style:none; padding:0; margin:0; background:var(--surface); border:1px solid var(--line); border-radius:12px }}
+.waits li {{ display:grid; grid-template-columns:minmax(180px,1.2fr) minmax(160px,1fr) auto; align-items:center; gap:6px 18px; padding:10px 16px; border-top:1px solid var(--line) }}
+.waits li:first-child {{ border-top:0 }}
+.w-name b {{ display:block; font-size:17px }} .w-name span {{ font-size:13px; color:var(--muted) }}
+.waits .strip {{ margin:0; max-height:44px }}
+.w-q {{ display:flex; flex-direction:column; font-size:13.5px; color:var(--muted); text-align:right }}
+
+details.sess {{ background:var(--surface); border:1px solid var(--line); border-radius:12px; margin-bottom:14px }}
+details.sess > summary {{ list-style:none; cursor:pointer; display:flex; align-items:baseline; flex-wrap:wrap; gap:4px 14px; padding:14px 16px }}
+details.sess > summary::-webkit-details-marker {{ display:none }}
+details.sess > summary::before {{ content:"▸"; color:var(--muted); transition:transform .15s }}
+details.sess[open] > summary::before {{ transform:rotate(90deg) }}
+details.sess > summary span {{ color:var(--muted) }}
+summary:focus-visible, a:focus-visible {{ outline:2px solid var(--range); outline-offset:2px; border-radius:8px }}
+.scroll {{ overflow-x:auto; border-top:1px solid var(--line) }}
+table {{ border-collapse:collapse; width:100%; min-width:820px }}
+th, td {{ text-align:left; padding:9px 12px; vertical-align:top; font-size:14.5px }}
+thead th {{ font-size:12.5px; color:var(--muted); font-weight:600; border-bottom:1px solid var(--line) }}
+tbody th {{ font-weight:600; white-space:nowrap }}
+tr.grp th {{ font:600 15px "Barlow Semi Condensed",sans-serif; color:var(--muted); padding-top:16px; background:var(--bg) }}
+tbody tr + tr td, tbody tr + tr th {{ border-top:1px solid var(--line) }}
+td small, th small {{ display:block; color:var(--muted); font-size:12.5px }}
+.st {{ display:flex; align-items:center; gap:7px; font-weight:500 }}
+.dot {{ width:8px; height:8px; border-radius:50%; background:var(--line); flex:none }}
+.dot.live {{ background:var(--long); box-shadow:0 0 0 3px var(--long-soft) }}
+.dot.wait {{ background:var(--range) }} .dot.win {{ background:var(--long) }} .dot.loss {{ background:var(--short) }}
+tr.st-open td, tr.st-open th {{ background:var(--long-soft) }}
+.lv3 {{ display:flex; flex-direction:column; font-size:13.5px }}
+.qc b {{ font-family:"Barlow Semi Condensed",sans-serif; font-size:16px }}
+.qc.q-strong, .qc.q-good {{ color:var(--long) }} .qc.q-weak {{ color:var(--short) }} .qc.q-flip, .qc.q-none {{ color:var(--muted) }}
+
+.fine {{ margin-top:36px; padding-top:16px; border-top:1px solid var(--line); color:var(--muted); font-size:14px }}
+.fine h2 {{ font-size:20px; color:var(--ink); margin-bottom:6px }}
+.fine p {{ max-width:78ch; margin:0 0 10px }}
+.fine b {{ color:var(--ink) }}
+
+@media (max-width:640px) {{
+  h1 {{ font-size:36px }}
+  .lv {{ grid-template-columns:repeat(2,1fr); gap:10px }}
+  .waits li {{ grid-template-columns:1fr; }}
+  .w-q {{ flex-direction:row; gap:14px; text-align:left }}
+  .band-s em {{ font-size:10.5px }}
+}}
+@media (prefers-reduced-motion: reduce) {{ * {{ transition:none !important }} }}
 </style></head>
 <body><main>
-<h1>Breakout-Dashboard</h1>
-<p class="muted">Stand {stamp} Schweizer Zeit · aktualisiert sich alle 5 Minuten (die Seite lädt alle 2 Minuten neu)</p>
+<header class="top">
+  <div><h1>Breakout-Board</h1><p>{when}</p></div>
+  <p class="count"><b>{len(best)}</b> frische Signale, {n_open} offen insgesamt</p>
+</header>
+{timeline(rows, now)}
 
-<h2>Beste frische Signale</h2>
-<p class="muted">Signal aktiv, Kurs höchstens {CHASE_LIMIT_R:g} R vom Einstieg entfernt, und dieselbe Regel war beim
-gleichen Markt und in der gleichen Session in den letzten ~60 Tagen im Schnitt positiv (mind. {MIN_HISTORY} Fälle).
-Sortiert nach diesem Durchschnitt.</p>
+<section>
+<div class="sec"><h2>Jetzt interessant</h2>
+<p>Signal ausgelöst, Kurs noch nah am Einstieg, und dieselbe Regel hat bei diesem Markt in den letzten ~60 Tagen
+im Schnitt Gewinn gebracht. Die beste Vorgeschichte steht vorne.</p></div>
 {best_html}
+</section>
 
-<h2>Warten auf Ausbruch</h2>
+<section>
+<div class="sec"><h2>Warten auf Ausbruch</h2>
+<p>Spanne steht, noch kein Ausbruch. Der Punkt zeigt, wo der Kurs gerade im Band liegt.</p></div>
 {wait_html}
+</section>
 
 {tables}
 {err_html}
 
-<div class="disclaimer">
-<p><b>So liest du das:</b> Die Eröffnungsspanne sind die ersten 15 Minuten der Session. Ein Signal entsteht, wenn eine
-5-Minuten-Kerze <b>über</b> der Spanne schliesst (Long) oder <b>darunter</b> (Short). Stop = Mitte der Spanne,
-Ziel = {TARGET_R:g}× das Risiko. „R“ ist das Vielfache des Risikos: +{TARGET_R:g} R = Ziel, −1 R = Stop.
-„Trefferquote“ = wie oft dieselbe Regel beim gleichen Markt in den letzten ~60 Tagen zuerst das Ziel erreicht hat.
-Weil das Ziel doppelt so weit weg ist wie der Stop, reichen {round(BREAKEVEN * 100)} % zum Ausgleich (der Strich im Balken).
-Einstufung: <b>stark</b> = mind. 15 Prozentpunkte darüber, <b>gut</b> = 5–15 darüber, <b>Münzwurf</b> = weniger als 5 daneben,
-<b>schwach</b> = mehr als 5 darunter. Unter {MIN_HISTORY} Fällen: zu wenig Daten. Gebühren und Spread sind nicht eingerechnet.</p>
-<p><b>Keine Anlageberatung.</b> Kostenlose, verzögerte Yahoo-Daten. Futures und Kassakurse weichen von den CFD-Kursen
-deines Brokers ab: Übernimm Stop und Ziel als Prozent-Abstand, nicht als feste Zahl. CFDs und Krypto haben oft einen
-Hebel, damit kannst du mehr verlieren als hier berechnet. Die Historie ist kein Versprechen für die Zukunft.
-Die meisten Daytrader verlieren Geld.</p>
-</div>
+<footer class="fine">
+<h2>So liest du das</h2>
+<p>Das gelbe Band ist die Eröffnungsspanne, die ersten 15 Minuten einer Session. Schliesst eine 5-Minuten-Kerze
+darüber, entsteht ein Long-Signal, darunter ein Short-Signal. Der Stop liegt in der Mitte des Bandes, das Ziel
+{TARGET_R:g}× so weit vom Einstieg wie der Stop. R ist das Vielfache des Risikos: +{TARGET_R:g} R heisst Ziel erreicht,
+−1 R heisst Stop.</p>
+<p>Die <b>Trefferquote</b> sagt, wie oft dieselbe Regel beim gleichen Markt in den letzten ~60 Tagen zuerst das Ziel
+erreicht hat. Weil ein Treffer zwei Stops ausgleicht, reichen {be} % (der Strich im Balken).
+<b>Stark</b> heisst mindestens 15 Punkte darüber, <b>gut</b> 5 bis 15 darüber, <b>Münzwurf</b> weniger als 5 daneben,
+<b>schwach</b> mehr als 5 darunter. Unter {MIN_HISTORY} Fällen gibt es keine Quote. Gebühren und Spread sind nicht
+eingerechnet.</p>
+<p><b>Keine Anlageberatung.</b> Kostenlose, verzögerte Kurse von Yahoo. Indizes, Gold und Öl sind Futures-Kurse und
+weichen vom CFD-Kurs deines Brokers ab, übernimm Stop und Ziel deshalb als Prozent-Abstand. CFDs und Krypto haben oft
+einen Hebel, damit kannst du mehr verlieren als hier steht. Die Vergangenheit sagt nichts Sicheres über den nächsten
+Trade, und die meisten Daytrader verlieren Geld.</p>
+</footer>
 </main></body></html>
 """
 

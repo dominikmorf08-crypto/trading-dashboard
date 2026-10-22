@@ -337,6 +337,102 @@ def forecast(r, now):
 # --------------------------------------------------------------------------
 
 
+TM_REPLAYS = 2000
+TM_SEED = 19
+TM_WINDOW = 2     # Kerzen aus +/- 2 Zeitfenstern derselben Tageszeit
+TM_MIN_DAYS = 20
+
+
+def timemachine(bars, s, r, today, replays=TM_REPLAYS, seed=TM_SEED):
+    """Spielt den Rest der Session tausendfach nach, Kerze fuer Kerze aus den eigenen
+    vergangenen Kerzen derselben Tageszeit (wie trader-timemachine)."""
+    import random
+    nbar = (r["t_end"] - r["t0"]) // BAR
+    by_ts = {b[0]: b for b in bars}
+    pool = [[] for _ in range(nbar)]
+    days = 0
+    for d in sorted({local(b[0], s["tz"]).date() for b in bars}):
+        if d >= today:
+            continue
+        t0 = local_to_ts(d, *s["start"], s["tz"])
+        seq = [by_ts.get(t0 + i * BAR) for i in range(nbar)]
+        if any(x is None for x in seq):
+            continue
+        prev = by_ts.get(t0 - BAR)
+        prev_c = prev[4] if prev else seq[0][1]
+        days += 1
+        for i, b in enumerate(seq):
+            pool[i].append((b[1] / prev_c, b[2] / prev_c, b[3] / prev_c, b[4] / prev_c))
+            prev_c = b[4]
+    if days < TM_MIN_DAYS:
+        return None
+    start = (r["trig_ts"] - r["t0"]) // BAR          # erste Kerze nach dem Einstieg
+    if start >= nbar:
+        return None
+    win = []
+    for i in range(nbar):
+        w = []
+        for j in range(max(0, i - TM_WINDOW), min(nbar, i + TM_WINDOW + 1)):
+            w.extend(pool[j])
+        win.append(w)
+    rnd = random.Random(seed)
+    side, entry, stop, target, risk = r["side"], r["entry"], r["stop"], r["target"], r["risk"]
+    tp = sl = 0
+    rs = []
+    for _ in range(replays):
+        p = entry
+        out = None
+        for i in range(start, nbar):
+            o, h, l, c = rnd.choice(win[i])
+            hi, lo = p * h, p * l
+            if (lo <= stop) if side > 0 else (hi >= stop):
+                out = -1.0
+                break
+            if (hi >= target) if side > 0 else (lo <= target):
+                out = TARGET_R
+                break
+            p *= c
+        if out == -1.0:
+            sl += 1
+        elif out is not None:
+            tp += 1
+        rs.append(out if out is not None else side * (p - entry) / risk)
+    n = replays
+    res = dict(n=n, days=days, seed=seed, bars=nbar - start, tp=tp / n, sl=sl / n,
+               open=(n - tp - sl) / n, avgR=sum(rs) / n)
+    hit = tp + sl
+    if hit:
+        edge = (tp / hit - BREAKEVEN) * 100
+        side_w = "TP" if edge > 0 else "SL"
+        if abs(edge) < 5:
+            res["verdict"], res["vcls"] = "Münzwurf", "q-flip"
+        elif abs(edge) < 15:
+            res["verdict"], res["vcls"] = f"leicht Richtung {side_w}", "q-good" if edge > 0 else "q-weak"
+        else:
+            res["verdict"], res["vcls"] = f"deutlich Richtung {side_w}", "q-strong" if edge > 0 else "q-weak"
+    else:
+        res["verdict"], res["vcls"] = "bleibt meist offen", "q-flip"
+    return res
+
+
+def tm_html(tm):
+    if not tm:
+        return ""
+    p = lambda x: f"{round(x * 100)} %"
+    return (f"<div class='tm {tm['vcls']}'><div class='tm-h'><b>Zeitmaschine</b>"
+            f"<span>{tm['n']:,} Durchläufe</span></div>".replace(",", "'") +
+            f"<div class='tm-v'>{esc(tm['verdict'])}</div>"
+            f"<div class='meter3'><span class='m-tp' style='width:{tm['tp'] * 100:.1f}%'></span>"
+            f"<span class='m-op' style='width:{tm['open'] * 100:.1f}%'></span>"
+            f"<span class='m-sl' style='width:{tm['sl'] * 100:.1f}%'></span>"
+            f"<i style='left:{BREAKEVEN * (tm['tp'] + tm['sl']) * 100:.1f}%'></i></div>"
+            f"<div class='qfoot'><span class='k-tp'>TP zuerst {p(tm['tp'])}</span>"
+            f"<span class='k-sl'>SL zuerst {p(tm['sl'])}</span><span>offen bis Schluss {p(tm['open'])}</span>"
+            f"<span>Ø {tm['avgR']:+.2f} R</span></div>"
+            f"<p class='hist'>Ab dem Einstieg den Rest der Session ({tm['bars']} Kerzen) {tm['n']}-mal nachgespielt aus den eigenen "
+            f"5-Minuten-Kerzen von {tm['days']} vergangenen Tagen, Seed {tm['seed']}. Simulation, keine Vorhersage.</p></div>")
+
+
 def evaluate(now, offline=None, pause=0.3):
     rows, errors = [], []
     for sym, name, group, dec, note in MARKETS:
@@ -360,6 +456,8 @@ def evaluate(now, offline=None, pause=0.3):
                      session=s["key"], hist=history(bars, s, today, mr))
             if r.get("status") in ("pending", "forming", "waiting"):
                 r["fc"] = forecast(r, now)
+            if r.get("status") == "open":
+                r["tm"] = timemachine(bars, s, r, today)
             rows.append(r)
         if not offline:
             time.sleep(pause)
@@ -528,6 +626,7 @@ def card(r):
   </dl>
   {quality_html(h)}
   <p class="hist">{hist_text(h)}</p>
+  {tm_html(r.get('tm'))}
   {note}
 </article>"""
 
@@ -807,6 +906,11 @@ section {{ margin-bottom:38px }}
 .m-op {{ background:var(--line) }}
 .meter3 i {{ position:absolute; top:-4px; bottom:-4px; width:2px; background:var(--ink) }}
 .qfoot {{ display:flex; flex-wrap:wrap; gap:2px 12px; font-size:12.5px; color:var(--muted) }}
+.tm {{ border-top:1px solid var(--line); margin-top:10px; padding-top:10px }}
+.tm-h {{ display:flex; justify-content:space-between; align-items:baseline; font-size:13.5px; color:var(--muted) }}
+.tm-h b {{ color:var(--ink); font:600 17px "Barlow Semi Condensed",sans-serif }}
+.tm-v {{ font:700 20px "Barlow Semi Condensed",sans-serif; margin-top:2px }}
+.tm.q-strong .tm-v, .tm.q-good .tm-v {{ color:var(--long) }} .tm.q-weak .tm-v {{ color:var(--short) }} .tm.q-flip .tm-v {{ color:var(--flip) }}
 .qfoot .k-tp {{ color:var(--long); font-weight:600 }} .qfoot .k-sl {{ color:var(--short); font-weight:600 }}
 .qlabel {{ font-size:14px; color:var(--muted) }}
 .hist {{ margin:8px 0 0; font-size:13px; color:var(--muted) }}

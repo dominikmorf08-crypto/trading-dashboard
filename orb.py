@@ -813,7 +813,7 @@ def render_calls(calls, rows, now):
     return f"""
 <section class="calls" id="calls">
 <div class="sec"><h2>Calls heute</h2>
-<p>{len(calls)} Calls: {n_tp}× TP, {n_sl}× SL, {n_run} laufen noch. Stärkste zuerst. Ein Call entsteht, sobald ein
+<p>{len(calls)} {'Call' if len(calls) == 1 else 'Calls'}: {n_tp}× TP, {n_sl}× SL, {n_run} {'läuft' if n_run == 1 else 'laufen'} noch. Stärkste zuerst. Ein Call entsteht, sobald ein
 Signal mit Stärke „stark“ auslöst und die Zeitmaschine nicht Richtung SL zeigt.</p></div>
 <ul class="calllist">{items}</ul>
 </section>"""

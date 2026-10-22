@@ -704,6 +704,8 @@ def render(rows, best, waiting, errors, now):
                     esc(", ".join(e.split(":")[0] for e in errors)) + ". Beim nächsten Lauf wird es neu versucht.</p>")
 
     be = round(BREAKEVEN * 100)
+    sim = bot_sim()
+    bot_html = render_bot(sim, bot_today(rows, sim["eq"]))
     return f"""<!doctype html>
 <html lang="de"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -847,6 +849,31 @@ tr.st-open td, tr.st-open th {{ background:var(--long-soft) }}
 .fc {{ grid-column:1 / -1; margin:2px 0 0; display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; font-size:14px; color:var(--muted) }}
 .fc .eta {{ font:700 20px "Barlow Semi Condensed",sans-serif; color:var(--range); white-space:nowrap }}
 .fc b {{ color:var(--ink) }} .fc.none {{ font-size:13px }}
+.bot-box {{ background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:16px }}
+.bot h3 {{ font:600 19px "Barlow Semi Condensed",sans-serif; margin:18px 0 6px }}
+.bot .sum {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:12px; margin-bottom:12px }}
+.bot .sum div {{ display:flex; flex-direction:column }}
+.bot .sum span {{ font-size:13px; color:var(--muted) }}
+.bot .sum b {{ font:700 32px/1.1 "Barlow Semi Condensed",sans-serif; font-variant-numeric:tabular-nums }}
+.bot .sum small {{ font-size:13px; color:var(--muted) }}
+.bot .sum.up div:nth-child(2) b {{ color:var(--long) }} .bot .sum.down div:nth-child(2) b {{ color:var(--short) }}
+.eq {{ display:block; width:100%; height:auto; background:var(--bg); border-radius:8px }}
+.eq-line {{ fill:none; stroke-width:2.5; stroke-linejoin:round }} .eq-line.up {{ stroke:var(--long) }} .eq-line.down {{ stroke:var(--short) }}
+.eq-area.up {{ fill:var(--long-soft) }} .eq-area.down {{ fill:var(--short-soft) }}
+.eq-base {{ stroke:var(--muted); stroke-dasharray:4 4; stroke-width:1 }}
+.eq-lab {{ font:500 11px Barlow,sans-serif; fill:var(--muted) }}
+.blog {{ list-style:none; margin:0; padding:0 }}
+.blog li {{ display:grid; grid-template-columns:96px 1fr 1.2fr auto; gap:4px 12px; padding:7px 0; border-top:1px solid var(--line); font-size:14.5px; align-items:baseline }}
+.blog li span {{ color:var(--muted) }}
+.blog em {{ font:700 16px "Barlow Semi Condensed",sans-serif; font-style:normal; font-variant-numeric:tabular-nums; text-align:right }}
+.blog em.pos {{ color:var(--long) }} .blog em.neg {{ color:var(--short) }}
+.bust {{ color:var(--short); font-weight:600 }}
+@media (max-width:640px) {{
+  .blog li {{ grid-template-columns:1fr auto; }}
+  .blog li span:first-child {{ grid-column:1 / -1; font-size:12.5px }}
+  .blog li span:nth-of-type(2) {{ grid-column:1; grid-row:3; font-size:13px }}
+  .blog li em {{ grid-row:2 / span 2; grid-column:2 }}
+}}
 .fine {{ margin-top:36px; padding-top:16px; border-top:1px solid var(--line); color:var(--muted); font-size:14px }}
 .fine h2 {{ font-size:20px; color:var(--ink); margin-bottom:6px }}
 .fine p {{ max-width:78ch; margin:0 0 10px }}
@@ -913,6 +940,7 @@ aus den letzten ~60 Tagen: an Tagen, an denen um diese Uhrzeit auch noch kein Au
 
 {tables}
 {err_html}
+{bot_html}
 
 <footer class="fine">
 <h2>So liest du das</h2>
@@ -1172,6 +1200,176 @@ erlauben regulierte Broker meist höchstens Hebel 30 bei Devisen, 20 bei Indizes
 </div>
 </main></body></html>
 """
+
+
+# --------------------------------------------------------------------------
+# Bot-Simulator: 300 Start, pro Session die ersten 3 guten Signale, je 1/3 des Vermoegens, Hebel 100
+# --------------------------------------------------------------------------
+
+BOT_START = 300.0
+BOT_LEV = 100
+BOT_SLOTS = 3
+BOT_LABELS = {"stark", "gut"}
+
+
+def _cost(sym):
+    g = next((m[2] for m in MARKETS if m[0] == sym), "")
+    return BT_COST.get(g, 0.0003)
+
+
+def _name(sym):
+    return next((m[1] for m in MARKETS if m[0] == sym), sym)
+
+
+def bot_sim():
+    sessions = {}
+    for sym, trades in BT.items():
+        for t in trades:
+            if t["label"] in BOT_LABELS:
+                sessions.setdefault((t["date"], t["session"]), []).append(dict(t, sym=sym))
+    keys = sorted(sessions, key=lambda k: min(t["entry_ts"] for t in sessions[k]))
+    eq, curve, log = BOT_START, [], []
+    n = wins = liq = 0
+    peak, maxdd = BOT_START, 0.0
+    if keys:
+        curve.append((min(t["entry_ts"] for t in sessions[keys[0]]), eq))
+    for k in keys:
+        picks = sorted(sessions[k], key=lambda t: t["entry_ts"])[:BOT_SLOTS]
+        stake = eq / BOT_SLOTS
+        total = 0.0
+        for t in picks:
+            size = stake * BOT_LEV
+            if t["mae"] >= 1 / BOT_LEV:
+                pnl, how = -stake, "liquidiert"
+                liq += 1
+            else:
+                pnl = max(-stake, size * t["ret"] - size * _cost(t["sym"]))
+                how = "Ziel" if t["R"] >= TARGET_R else ("Stop" if t["R"] <= -1 else "Session-Ende")
+            n += 1
+            wins += pnl > 0
+            total += pnl
+            log.append(dict(ts=t["entry_ts"], sym=t["sym"], side=t["side"], label=t["label"],
+                            stake=stake, pnl=pnl, how=how))
+        eq = max(0.0, eq + total)
+        curve.append((max(t["exit_ts"] for t in picks), eq))
+        peak = max(peak, eq)
+        if peak:
+            maxdd = max(maxdd, (peak - eq) / peak)
+        if eq < 0.01:
+            eq = 0.0
+            break
+    return dict(eq=eq, curve=curve, log=log, n=n, wins=wins, liq=liq, maxdd=maxdd, sessions=len(keys))
+
+
+def bot_today(rows, eq):
+    """Was der Bot heute haette: pro Session die ersten 3 Signale mit stark/gut."""
+    out = []
+    for s in SESSIONS:
+        cand = []
+        for r in rows:
+            if r["session"] != s["key"] or r.get("status") not in ("open", "target", "stop", "closed"):
+                continue
+            _, label, _ = quality(r["hist"][r["side"]])
+            if label in BOT_LABELS:
+                cand.append((r, label))
+        cand.sort(key=lambda x: x[0]["trig_ts"])
+        for r, label in cand[:BOT_SLOTS]:
+            stake = eq / BOT_SLOTS
+            if r["status"] == "target":
+                px = r["target"]
+            elif r["status"] == "stop":
+                px = r["stop"]
+            else:
+                px = r["price"]
+            ret = r["side"] * (px - r["entry"]) / r["entry"]
+            pnl = max(-stake, stake * BOT_LEV * (ret - _cost(r["symbol"])))
+            out.append(dict(r=r, label=label, stake=stake, pnl=pnl, ret=ret))
+    return out
+
+
+def equity_svg(curve, w=640, h=170):
+    if len(curve) < 2:
+        return ""
+    vals = [max(v, 0.01) for _, v in curve]
+    import math
+    lo, hi = min(vals + [BOT_START]), max(vals + [BOT_START])
+    logscale = hi / lo > 20
+    f = (lambda v: math.log10(v)) if logscale else (lambda v: v)
+    a, b = f(lo), f(hi)
+    if b == a:
+        b = a + 1
+    t0, t1 = curve[0][0], curve[-1][0]
+
+    def X(t):
+        return 6 + (t - t0) / max(1, t1 - t0) * (w - 12)
+
+    def Y(v):
+        return 10 + (1 - (f(max(v, 0.01)) - a) / (b - a)) * (h - 30)
+
+    pts = " ".join(f"{X(t):.1f},{Y(v):.1f}" for t, v in curve)
+    up = curve[-1][1] >= BOT_START
+    base = Y(BOT_START)
+    area = f"{X(t0):.1f},{h - 20} " + pts + f" {X(t1):.1f},{h - 20}"
+    d0 = local(t0, "ch").strftime("%d.%m.")
+    d1 = local(t1, "ch").strftime("%d.%m.")
+    note = "<text x='8' y='14' class='eq-lab'>logarithmische Skala</text>" if logscale else ""
+    return (f"<svg class='eq' viewBox='0 0 {w} {h}' role='img' aria-label='Kontoverlauf des Bots'>"
+            f"<polygon points='{area}' class='eq-area {'up' if up else 'down'}'/>"
+            f"<line x1='6' x2='{w - 6}' y1='{base:.1f}' y2='{base:.1f}' class='eq-base'/>"
+            f"<text x='{w - 8}' y='{base - 5:.1f}' class='eq-lab' text-anchor='end'>Start {chf(BOT_START)}</text>"
+            f"<polyline points='{pts}' class='eq-line {'up' if up else 'down'}'/>"
+            f"<text x='6' y='{h - 4}' class='eq-lab'>{d0}</text>"
+            f"<text x='{w - 6}' y='{h - 4}' class='eq-lab' text-anchor='end'>{d1}</text>"
+            f"{note}"
+            f"</svg>")
+
+
+def render_bot(sim, today):
+    eq = sim["eq"]
+    delta = eq - BOT_START
+    cls = "up" if delta >= 0 else "down"
+    rate = f"{sim['wins'] / sim['n'] * 100:.0f} %" if sim["n"] else "–"
+    last = ""
+    for x in reversed(sim["log"][-10:]):
+        last += (f"<li><span>{local(x['ts'], 'ch').strftime('%d.%m. %H:%M')}</span>"
+                 f"<b>{esc(_name(x['sym']))}</b><span>{side_word(x['side'])}, {x['how']}</span>"
+                 f"<em class='{'pos' if x['pnl'] > 0 else 'neg'}'>{'+' if x['pnl'] > 0 else '−'}{chf(abs(x['pnl']))}</em></li>")
+    td = ""
+    for x in today:
+        r = x["r"]
+        st = STATUS.get(r["status"], r["status"])
+        td += (f"<li><span>{ch_time(r['trig_ts'])}</span><b>{esc(r['name'])}</b>"
+               f"<span>{side_word(r['side'])}, {esc(st)}, {x['label']}</span>"
+               f"<em class='{'pos' if x['pnl'] > 0 else 'neg'}'>{'+' if x['pnl'] > 0 else '−'}{chf(abs(x['pnl']))}</em></li>")
+    today_html = (f"<ul class='blog'>{td}</ul>" if td else
+                  "<p class='empty'>Heute hat der Bot noch nichts gekauft. Er wartet auf die ersten Signale mit "
+                  "„stark“ oder „gut“.</p>")
+    busted = "<p class='bust'>Das Konto ist leer. Ab hier hätte der Bot nicht mehr handeln können.</p>" if eq == 0 else ""
+    return f"""
+<section class="bot" id="bot">
+<div class="sec"><h2>Bot-Simulator</h2>
+<p>Ein gedachter Bot startet mit {chf(BOT_START)}. In jeder Session kauft er die ersten {BOT_SLOTS} Signale mit
+Einstufung „stark“ oder „gut“, jedes mit einem Drittel seines ganzen Vermögens und Hebel {BOT_LEV}. Gewinne und
+Verluste fliessen sofort ins nächste Drittel.</p></div>
+<div class="bot-box">
+<div class="sum {cls}">
+  <div><span>Start</span><b>{chf(BOT_START)}</b></div>
+  <div><span>Jetzt</span><b>{chf(eq)}</b><small>{'+' if delta >= 0 else '−'}{chf(abs(delta))} ({delta / BOT_START * 100:+.0f} %)</small></div>
+  <div><span>Trades</span><b>{sim['n']}</b><small>{rate} im Plus, {sim['liq']} liquidiert</small></div>
+  <div><span>Grösster Rückgang</span><b>{sim['maxdd'] * 100:.0f} %</b><small>vom Höchststand</small></div>
+</div>
+{equity_svg(sim['curve'])}
+{busted}
+<h3>Heute</h3>
+{today_html}
+<h3>Letzte Trades</h3>
+<ul class="blog">{last or '<li>Noch keine.</li>'}</ul>
+<p class="hist">Rückrechnung über {sim['sessions']} Sessions ohne Blick in die Zukunft: Die Einstufung eines Signals
+kennt nur die Tage davor. Mit Hebel {BOT_LEV} ist ein Drittel weg, sobald der Kurs 1 % gegen den Trade läuft. Mehr als
+den Einsatz verliert ein Trade nicht. London und New York überschneiden sich am Nachmittag; vereinfacht rechnet der
+Bot New York mit dem Stand nach London. Spread ist eingerechnet, Ausführung zum Schlusskurs der Signal-Kerze.</p>
+</div>
+</section>"""
 
 
 def to_json(rows, best, now):

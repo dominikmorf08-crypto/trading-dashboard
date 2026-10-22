@@ -23,6 +23,7 @@ weil die USA die Uhr zu einem anderen Datum umstellen. Das rechnet das Skript se
 - **Zu eng:** Ist das Risiko kleiner als 0,05 % des Kurses (Devisen: 0,02 %), gibt es kein Signal, weil schon der Spread den Stop auslösen könnte.
 - **Historie:** dieselbe Regel, beim gleichen Markt und in der gleichen Session, an den letzten ~60 Tagen
   (so weit reichen die kostenlosen 5-Minuten-Daten).
+- **Zeitschätzung:** An den vergangenen Tagen, an denen um dieselbe Uhrzeit auch noch kein Ausbruch da war: wie oft er noch kam und nach wie vielen Minuten (Median, dazu das mittlere Band 25–75 %).
 - **Beste frische Signale:** aktiv, höchstens 0,75 R vom Einstieg weggelaufen, und die Historie hat mindestens
   8 Fälle mit positivem Durchschnitt. Sortiert nach diesem Durchschnitt.
 

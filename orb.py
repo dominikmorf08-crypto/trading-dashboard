@@ -281,12 +281,17 @@ def run_session(bars, d, s, now=None, live=None, min_risk=MIN_RISK_PCT):
 def history(bars, s, today, min_risk=MIN_RISK_PCT):
     days = sorted({local(b[0], s["tz"]).date() for b in bars})
     out = {1: [], -1: []}
+    timing = []   # Minuten vom Ende der Spanne bis zum Ausbruch, None = kein Ausbruch
     for d in days:
         if d >= today:
             continue
         r = run_session(bars, d, s, min_risk=min_risk)
         if r.get("status") in ("stop", "target", "closed", "open"):
             out[r["side"]].append(r["R"])
+        if "trig_ts" in r:
+            timing.append((r["trig_ts"] - r["t_or"]) / 60)
+        elif r.get("status") == "expired":
+            timing.append(None)
     stats = {}
     for side, rs in out.items():
         n = len(rs)
@@ -297,7 +302,33 @@ def history(bars, s, today, min_risk=MIN_RISK_PCT):
             avgR=round(sum(rs) / n, 3) if n else None,
         )
         stats[side]["neither"] = n - stats[side]["target"] - stats[side]["stop"]
+    stats["timing"] = timing
     return stats
+
+
+def _q(xs, f):
+    xs = sorted(xs)
+    i = (len(xs) - 1) * f
+    lo = int(i)
+    hi = min(lo + 1, len(xs) - 1)
+    return xs[lo] + (xs[hi] - xs[lo]) * (i - lo)
+
+
+def forecast(r, now):
+    """Wann kommt der Ausbruch? Aus den vergangenen ~60 Tagen desselben Markts und derselben Session."""
+    timing = (r.get("hist") or {}).get("timing") or []
+    if len(timing) < MIN_HISTORY or "t_or" not in r:
+        return None
+    el = max(0.0, (now - r["t_or"]) / 60)
+    base = [m for m in timing if m is None or m > el]
+    if len(base) < 5:
+        return None
+    later = [m - el for m in base if m is not None]
+    f = dict(p=len(later) / len(base), n=len(base), elapsed=el)
+    if later:
+        f.update(med=_q(later, .5), q1=_q(later, .25), q3=_q(later, .75))
+        f["eta"] = int(max(now, r["t_or"]) + f["med"] * 60)
+    return f
 
 
 # --------------------------------------------------------------------------
@@ -324,6 +355,8 @@ def evaluate(now, offline=None, pause=0.3):
             r = run_session(bars, today, s, now=now, live=live, min_risk=mr)
             r.update(symbol=sym, name=name, group=group, dec=dec, note=note,
                      session=s["key"], hist=history(bars, s, today, mr))
+            if r.get("status") in ("pending", "forming", "waiting"):
+                r["fc"] = forecast(r, now)
             rows.append(r)
         if not offline:
             time.sleep(pause)
@@ -346,9 +379,9 @@ def evaluate(now, offline=None, pause=0.3):
         if not cand:
             continue
         r["best_hist"] = max(h["avgR"] for h in cand)
-        if r["best_hist"] > 0:
-            waiting.append(r)
-    waiting.sort(key=lambda r: r["best_hist"], reverse=True)
+        waiting.append(r)
+    waiting.sort(key=lambda r: (r["best_hist"] > 0, (r.get("fc") or {}).get("p", 0), r["best_hist"]),
+                 reverse=True)
     return rows, best, waiting, errors
 
 
@@ -492,16 +525,69 @@ def card(r):
 </article>"""
 
 
+def dur(mins):
+    mins = max(0, int(round(mins)))
+    if mins < 60:
+        return f"{mins} Min."
+    h, m = divmod(mins, 60)
+    return f"{h} Std. {m} Min." if m else f"{h} Std."
+
+
+def fc_short(r):
+    f = r.get("fc")
+    if not f:
+        return ""
+    if "med" not in f:
+        return f"bisher meist kein Ausbruch mehr ({round(f['p'] * 100)} %)"
+    if r.get("status") in ("pending", "forming"):
+        return f"Ausbruch meist um {ch_time(f['eta'])} ({round(f['p'] * 100)} % der Tage)"
+    return f"Ausbruch meist in ~{dur(f['med'])} ({round(f['p'] * 100)} %)"
+
+
+def fc_long(r):
+    f = r.get("fc")
+    if not f:
+        return "<p class='fc none'>Für eine Zeitschätzung gibt es zu wenig vergangene Tage.</p>"
+    p = round(f["p"] * 100)
+    if "med" not in f:
+        return (f"<p class='fc'><b>Eher kein Ausbruch mehr.</b> An den {f['n']} vergleichbaren Tagen kam um diese "
+                f"Zeit nur noch in {p} % ein Ausbruch.</p>")
+    return (f"<p class='fc'><span class='eta' data-at='{f['eta']}'>in ~{dur(f['med'])}</span>"
+            f"<span>Ausbruch geschätzt um <b>{ch_time(f['eta'])}</b>, meist zwischen {dur(f['q1'])} und "
+            f"{dur(f['q3'])} von jetzt. Kam bisher an {p} % der {f['n']} vergleichbaren Tage.</span></p>")
+
+
+def zones(rows, now):
+    """Countdown: wann oeffnet bzw. schliesst die Einstiegszone jeder Session."""
+    out = ""
+    for s in SESSIONS:
+        r = next((x for x in rows if x["session"] == s["key"] and "t0" in x), None)
+        if not r:
+            continue
+        name = esc(s["name"])
+        if now < r["t_or"]:
+            out += (f"<div class='zone soon'><span>{name}</span><b data-until='{r['t_or']}'>in "
+                    f"{dur((r['t_or'] - now) / 60)}</b><small>Einstiegszone öffnet um {ch_time(r['t_or'])}</small></div>")
+        elif now < r["t_last"]:
+            out += (f"<div class='zone open'><span>{name}</span><b>offen</b><small>Einstiege bis "
+                    f"{ch_time(r['t_last'])}, noch <em data-until='{r['t_last']}'>{dur((r['t_last'] - now) / 60)}</em>"
+                    f"</small></div>")
+        else:
+            out += (f"<div class='zone done'><span>{name}</span><b>vorbei</b><small>keine neuen Einstiege "
+                    f"mehr heute</small></div>")
+    return f"<div class='zones'>{out}</div>"
+
+
 def status_cell(r):
     st = r.get("status", "error")
     label = STATUS.get(st, st)
     extra, dot = "", "idle"
     if st == "pending":
-        extra = f"startet {ch_time(r['t0'])}"
+        extra = f"startet {ch_time(r['t0'])}. {fc_short(r)}".strip(". ")
     elif st == "forming":
-        extra, dot = f"steht um {ch_time(r['t_or'])}", "wait"
+        extra, dot = f"steht um {ch_time(r['t_or'])}. {fc_short(r)}".strip(". "), "wait"
     elif st == "waiting":
-        extra, dot = f"bis {ch_time(r['t_last'])}, jetzt {fmt(r['last'], r['dec'])}", "wait"
+        extra, dot = f"jetzt {fmt(r['last'], r['dec'])}. {fc_short(r)}".strip(". "), "wait"
     elif st in ("open", "target", "stop", "closed"):
         label = f"{side_word(r['side'])}: {label}"
         extra = f"seit {ch_time(r['trig_ts'])}"
@@ -529,8 +615,10 @@ def row_html(r):
                f"<span>Z {fmt(r['target'], d)}</span></span>")
     h = r.get("hist") or {1: dict(n=0), -1: dict(n=0)}
     return (f"<tr class='st-{r.get('status', 'error')}'><th scope='row'>{esc(r['name'])}</th>"
-            f"<td>{status_cell(r)}</td><td class='num'>{rng}</td><td class='num'>{lvl}</td>"
-            f"<td>{qcell(h[1])}</td><td>{qcell(h[-1])}</td></tr>")
+            f"<td data-l='Status'>{status_cell(r)}</td>"
+            f"<td class='num{' e' if rng == '–' else ''}' data-l='Spanne'>{rng}</td>"
+            f"<td class='num lvc{' e' if lvl == '–' else ''}' data-l='Stop, Einstieg, Ziel'>{lvl}</td>"
+            f"<td data-l='Long-Quote'>{qcell(h[1])}</td><td data-l='Short-Quote'>{qcell(h[-1])}</td></tr>")
 
 
 def timeline(rows, now):
@@ -577,15 +665,17 @@ def render(rows, best, waiting, errors, now):
 
     if waiting:
         items = ""
-        for r in waiting[:8]:
+        for r in waiting[:10]:
             items += (f"<li><div class='w-name'><b>{esc(r['name'])}</b>"
-                      f"<span>{esc(sess(r['session'])['name'])}, Spanne {fmt(r['lo'], r['dec'])} – "
-                      f"{fmt(r['hi'], r['dec'])}</span></div>"
+                      f"<span>{esc(sess(r['session'])['name'])}, jetzt {fmt(r['last'], r['dec'])}</span></div>"
                       f"{strip(r['lo'], r['hi'], r['last'], w=240, h=40)}"
-                      f"<div class='w-q'><span>Long {wr(r, 1)}</span><span>Short {wr(r, -1)}</span></div></li>")
+                      f"<div class='w-d'><span>bis oben <b>{pct(r['hi'], r['last'])}</b></span>"
+                      f"<span>bis unten <b>{pct(r['lo'], r['last'])}</b></span></div>"
+                      f"<div class='w-q'><span>Long {wr(r, 1)}</span><span>Short {wr(r, -1)}</span></div>"
+                      f"{fc_long(r)}</li>")
         wait_html = f"<ul class='waits'>{items}</ul>"
     else:
-        wait_html = "<p class='empty'>Kein Markt mit guter Vorgeschichte wartet gerade auf einen Ausbruch.</p>"
+        wait_html = "<p class='empty'>Gerade wartet kein Markt auf einen Ausbruch. Oben steht, wann die nächste Einstiegszone öffnet.</p>"
 
     tables = ""
     for s in SESSIONS:
@@ -709,7 +799,7 @@ section {{ margin-bottom:38px }}
 .empty {{ background:var(--surface); border:1px dashed var(--line); border-radius:12px; padding:14px 16px; margin:0; color:var(--muted) }}
 
 .waits {{ list-style:none; padding:0; margin:0; background:var(--surface); border:1px solid var(--line); border-radius:12px }}
-.waits li {{ display:grid; grid-template-columns:minmax(180px,1.2fr) minmax(160px,1fr) auto; align-items:center; gap:6px 18px; padding:10px 16px; border-top:1px solid var(--line) }}
+.waits li {{ display:grid; grid-template-columns:minmax(150px,1.1fr) minmax(160px,1fr) auto auto; align-items:center; gap:6px 18px; padding:12px 16px; border-top:1px solid var(--line) }}
 .waits li:first-child {{ border-top:0 }}
 .w-name b {{ display:block; font-size:17px }} .w-name span {{ font-size:13px; color:var(--muted) }}
 .waits .strip {{ margin:0; max-height:44px }}
@@ -739,17 +829,58 @@ tr.st-open td, tr.st-open th {{ background:var(--long-soft) }}
 .qc b {{ font-family:"Barlow Semi Condensed",sans-serif; font-size:16px }}
 .qc.q-strong, .qc.q-good {{ color:var(--long) }} .qc.q-weak {{ color:var(--short) }} .qc.q-flip, .qc.q-none {{ color:var(--muted) }}
 
+.zones {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:10px; margin:0 0 14px }}
+.zone {{ background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:12px 14px; display:grid; grid-template-columns:1fr auto; align-items:baseline; gap:0 10px }}
+.zone span {{ font:600 18px "Barlow Semi Condensed",sans-serif }}
+.zone b {{ font:700 26px "Barlow Semi Condensed",sans-serif; font-variant-numeric:tabular-nums }}
+.zone small {{ grid-column:1 / -1; color:var(--muted); font-size:13.5px }}
+.zone small em {{ font-style:normal; color:var(--ink); font-weight:600 }}
+.zone.open {{ border-color:var(--long); box-shadow:inset 4px 0 0 var(--long) }} .zone.open b {{ color:var(--long) }}
+.zone.soon {{ box-shadow:inset 4px 0 0 var(--range) }} .zone.soon b {{ color:var(--range) }}
+.zone.done b {{ color:var(--muted) }}
+.w-d {{ display:flex; flex-direction:column; font-size:13.5px; color:var(--muted) }}
+.w-d b {{ color:var(--ink); font-weight:600 }}
+.fc {{ grid-column:1 / -1; margin:2px 0 0; display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; font-size:14px; color:var(--muted) }}
+.fc .eta {{ font:700 20px "Barlow Semi Condensed",sans-serif; color:var(--range); white-space:nowrap }}
+.fc b {{ color:var(--ink) }} .fc.none {{ font-size:13px }}
 .fine {{ margin-top:36px; padding-top:16px; border-top:1px solid var(--line); color:var(--muted); font-size:14px }}
 .fine h2 {{ font-size:20px; color:var(--ink); margin-bottom:6px }}
 .fine p {{ max-width:78ch; margin:0 0 10px }}
 .fine b {{ color:var(--ink) }}
 
 @media (max-width:640px) {{
-  h1 {{ font-size:36px }}
+  body {{ font-size:16px }}
+  main {{ padding:18px 14px 48px }}
+  h1 {{ font-size:34px }} h2 {{ font-size:23px }}
+  .top {{ margin-bottom:12px }} .count {{ font-size:16px }}
+  .sigs {{ grid-template-columns:1fr }}
+  .sig h3 {{ font-size:24px }}
   .lv {{ grid-template-columns:repeat(2,1fr); gap:10px }}
-  .waits li {{ grid-template-columns:1fr; }}
-  .w-q {{ flex-direction:row; gap:14px; text-align:left }}
+  .lv dd {{ font-size:20px }}
+  .waits li {{ grid-template-columns:1fr 1fr; gap:8px 12px }}
+  .waits .strip {{ grid-column:1 / -1; order:-1 }}
+  .w-name {{ grid-column:1 / -1; order:-2 }}
+  .w-q {{ text-align:right }}
   .band-s em {{ font-size:10.5px }}
+  .tl-ticks span:nth-child(even) {{ display:none }}
+  .scroll {{ overflow:visible }}
+  table {{ min-width:0 }}
+  thead {{ display:none }}
+  table, tbody, tr, th, td {{ display:block; width:100% }}
+  tbody tr {{ display:grid; grid-template-columns:1fr 1fr; gap:6px 12px; padding:12px 14px }}
+  tbody tr + tr td, tbody tr + tr th {{ border-top:0 }}
+  tbody tr + tr {{ border-top:1px solid var(--line) }}
+  tbody th, tbody td {{ padding:0 }}
+  tbody tr > th {{ grid-column:1 / -1; font-size:17px }}
+  td[data-l="Status"], td.lvc {{ grid-column:1 / -1 }}
+  td.e {{ display:none }}
+  tr.st-open {{ background:var(--long-soft) }}
+  tr.st-open td, tr.st-open th {{ background:transparent }}
+  td[data-l]::before {{ content:attr(data-l); display:block; font-size:11.5px; color:var(--muted) }}
+  td[data-l="Status"]::before {{ display:none }}
+  tr.grp {{ display:block; padding:0 }} tr.grp th {{ padding:10px 14px 6px }}
+  .lv3 {{ flex-direction:row; gap:14px; flex-wrap:wrap }}
+  details.sess > summary {{ padding:12px 14px }}
 }}
 @media (prefers-reduced-motion: reduce) {{ * {{ transition:none !important }} }}
 </style></head>
@@ -758,6 +889,7 @@ tr.st-open td, tr.st-open th {{ background:var(--long-soft) }}
   <div><h1>Breakout-Board</h1><p>{when}</p></div>
   <p class="count"><b>{len(best)}</b> frische Signale, {n_open} offen insgesamt</p>
 </header>
+{zones(rows, now)}
 {timeline(rows, now)}
 
 <section>
@@ -769,7 +901,8 @@ im Schnitt Gewinn gebracht. Die beste Vorgeschichte steht vorne.</p></div>
 
 <section>
 <div class="sec"><h2>Warten auf Ausbruch</h2>
-<p>Spanne steht, noch kein Ausbruch. Der Punkt zeigt, wo der Kurs gerade im Band liegt.</p></div>
+<p>Spanne steht, noch kein Ausbruch. Der Punkt zeigt, wo der Kurs im Band liegt. Die Zeitschätzung kommt
+aus den letzten ~60 Tagen: an Tagen, an denen um diese Uhrzeit auch noch kein Ausbruch da war, wann er dann kam.</p></div>
 {wait_html}
 </section>
 
@@ -792,6 +925,23 @@ weichen vom CFD-Kurs deines Brokers ab, übernimm Stop und Ziel deshalb als Proz
 einen Hebel, damit kannst du mehr verlieren als hier steht. Die Vergangenheit sagt nichts Sicheres über den nächsten
 Trade, und die meisten Daytrader verlieren Geld.</p>
 </footer>
+<script>
+(function () {{
+  function d(m) {{ m = Math.max(0, Math.round(m)); if (m < 60) return m + " Min."; var h = Math.floor(m / 60), r = m % 60; return h + " Std." + (r ? " " + r + " Min." : ""); }}
+  function tick() {{
+    var now = Date.now() / 1000;
+    document.querySelectorAll("[data-until]").forEach(function (e) {{
+      var m = (+e.getAttribute("data-until") - now) / 60;
+      e.textContent = m <= 0 ? "jetzt" : (e.tagName === "EM" ? d(m) : "in " + d(m));
+    }});
+    document.querySelectorAll("[data-at]").forEach(function (e) {{
+      var m = (+e.getAttribute("data-at") - now) / 60;
+      e.textContent = m <= 1 ? "jeden Moment" : "in ~" + d(m);
+    }});
+  }}
+  tick(); setInterval(tick, 20000);
+}})();
+</script>
 </main></body></html>
 """
 

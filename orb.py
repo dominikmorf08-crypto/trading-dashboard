@@ -456,7 +456,7 @@ def evaluate(now, offline=None, pause=0.3):
                      session=s["key"], hist=history(bars, s, today, mr))
             if r.get("status") in ("pending", "forming", "waiting"):
                 r["fc"] = forecast(r, now)
-            if r.get("status") == "open":
+            if r.get("status") in ("open", "target", "stop", "closed"):
                 r["tm"] = timemachine(bars, s, r, today)
             rows.append(r)
         if not offline:
@@ -756,6 +756,69 @@ def wr(r, side):
     return "–" if win is None else f"{round(win * 100)} % TP ({label})"
 
 
+def pick_calls(rows):
+    """Calls: heutige Signale mit Staerke 'stark', bei denen die Zeitmaschine nicht Richtung SL zeigt."""
+    out = []
+    for r in rows:
+        if r.get("status") not in ("open", "target", "stop", "closed"):
+            continue
+        win, label, _ = quality(r["hist"][r["side"]])
+        tm = r.get("tm")
+        if label != "stark" or (tm and "SL" in tm["verdict"]):
+            continue
+        out.append((win, r))
+    out.sort(key=lambda x: x[0], reverse=True)
+    return [r for _, r in out]
+
+
+def render_calls(calls, rows, now):
+    if not calls:
+        nxt = ""
+        for s in SESSIONS:
+            r = next((x for x in rows if x["session"] == s["key"] and "t0" in x), None)
+            if r and now < r["t_last"]:
+                nxt = (f" Die nächsten Calls kommen frühestens um <b>{ch_time(r['t_or'])}</b> "
+                       f"({esc(s['name'])}-Session)." if now < r["t_or"] else
+                       f" Die {esc(s['name'])}-Session läuft noch bis {ch_time(r['t_last'])}, "
+                       f"neue Calls kommen hier sofort dazu.")
+                break
+        return (f"<section class='calls' id='calls'><div class='sec'><h2>Calls heute</h2></div>"
+                f"<p class='empty'>Heute noch kein Signal, das stark genug ist.{nxt}</p></section>")
+    n_tp = sum(1 for r in calls if r["status"] == "target")
+    n_sl = sum(1 for r in calls if r["status"] == "stop")
+    n_run = sum(1 for r in calls if r["status"] == "open")
+    items = ""
+    for r in calls:
+        d = r["dec"]
+        win, label, _ = quality(r["hist"][r["side"]])
+        tm = r.get("tm")
+        st = r["status"]
+        if st == "open":
+            state, scls = f"läuft, {r['R']:+.2f} R", "run"
+        elif st == "target":
+            state, scls = f"TP erreicht um {ch_time(r['exit_ts'])}, +{TARGET_R:g} R", "won"
+        elif st == "stop":
+            state, scls = f"SL erreicht um {ch_time(r['exit_ts'])}, −1 R", "lost"
+        else:
+            state, scls = f"Session-Ende, {r['R']:+.2f} R", "done"
+        tmtxt = f"Zeitmaschine: {esc(tm['verdict'])}, TP zuerst {round(tm['tp'] * 100)} %" if tm else ""
+        items += f"""
+<li class="call {'long' if r['side'] > 0 else 'short'} {scls}">
+  <div class="c-time">{ch_time(r['trig_ts'])}<small>{esc(sess(r['session'])['name'])}</small></div>
+  <div class="c-main"><b>{esc(r['name'])}</b><span class="dir">{side_arrow(r['side'])} {side_word(r['side'])}</span></div>
+  <div class="c-lv"><span>Einstieg <b>{fmt(r['entry'], d)}</b></span><span>SL <b>{fmt(r['stop'], d)}</b> <small>{pct(r['stop'], r['entry'])}</small></span><span>TP <b>{fmt(r['target'], d)}</b> <small>{pct(r['target'], r['entry'])}</small></span></div>
+  <div class="c-q"><span class="qnum">{round(win * 100)}<small>%</small></span><span>TP-Quote<br>{tmtxt}</span></div>
+  <div class="c-st">{state}</div>
+</li>"""
+    return f"""
+<section class="calls" id="calls">
+<div class="sec"><h2>Calls heute</h2>
+<p>{len(calls)} Calls: {n_tp}× TP, {n_sl}× SL, {n_run} laufen noch. Stärkste zuerst. Ein Call entsteht, sobald ein
+Signal mit Stärke „stark“ auslöst und die Zeitmaschine nicht Richtung SL zeigt.</p></div>
+<ul class="calllist">{items}</ul>
+</section>"""
+
+
 def render(rows, best, waiting, errors, now):
     stamp = local(now, "ch")
     days = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
@@ -988,6 +1051,31 @@ tr.st-open td, tr.st-open th {{ background:var(--long-soft) }}
   .blog li span:nth-of-type(2) {{ grid-column:1; grid-row:3; font-size:13px }}
   .blog li em {{ grid-row:2 / span 2; grid-column:2 }}
 }}
+.calls {{ margin-bottom:26px }}
+.calllist {{ list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:10px }}
+.call {{ display:grid; grid-template-columns:70px minmax(150px,1fr) minmax(240px,1.6fr) minmax(170px,1.1fr) minmax(140px,.9fr);
+  gap:8px 16px; align-items:center; background:var(--surface); border:1px solid var(--line); border-radius:12px;
+  padding:14px 16px; position:relative; overflow:hidden }}
+.call::before {{ content:""; position:absolute; left:0; top:0; bottom:0; width:5px; background:var(--long) }}
+.call.short::before {{ background:var(--short) }}
+.c-time {{ font:700 22px "Barlow Semi Condensed",sans-serif; line-height:1 }}
+.c-time small {{ display:block; font:500 12.5px Barlow,sans-serif; color:var(--muted); margin-top:3px }}
+.c-main b {{ display:block; font:700 24px/1.05 "Barlow Semi Condensed",sans-serif }}
+.c-main .dir {{ display:inline-block; margin-top:4px; font-size:14px; padding:1px 8px }}
+.c-lv {{ display:flex; flex-direction:column; font-size:14px; color:var(--muted) }}
+.c-lv b {{ color:var(--ink); font-variant-numeric:tabular-nums }}
+.c-q {{ display:flex; align-items:center; gap:8px; font-size:12.5px; color:var(--muted); line-height:1.25 }}
+.c-q .qnum {{ color:var(--long) }}
+.c-st {{ font:600 16px "Barlow Semi Condensed",sans-serif; text-align:right }}
+.call.won .c-st {{ color:var(--long) }} .call.lost .c-st {{ color:var(--short) }} .call.run .c-st {{ color:var(--range) }}
+.call.won {{ background:linear-gradient(90deg, var(--surface) 70%, var(--long-soft)) }}
+.call.lost {{ background:linear-gradient(90deg, var(--surface) 70%, var(--short-soft)) }}
+@media (max-width:760px) {{
+  .call {{ grid-template-columns:auto 1fr; gap:8px 14px }}
+  .c-lv, .c-q, .c-st {{ grid-column:1 / -1 }}
+  .c-lv {{ flex-direction:row; flex-wrap:wrap; gap:2px 14px }}
+  .c-st {{ text-align:left; font-size:17px }}
+}}
 .fine {{ margin-top:36px; padding-top:16px; border-top:1px solid var(--line); color:var(--muted); font-size:14px }}
 .fine h2 {{ font-size:20px; color:var(--ink); margin-bottom:6px }}
 .fine p {{ max-width:78ch; margin:0 0 10px }}
@@ -1036,10 +1124,11 @@ tr.st-open td, tr.st-open th {{ background:var(--long-soft) }}
   <a class="btlink" href="rueckrechnung.html">Was wäre mit 100 pro Markt herausgekommen?</a></p>
 </header>
 {zones(rows, now)}
+{render_calls(pick_calls(rows), rows, now)}
 {timeline(rows, now)}
 
 <section>
-<div class="sec"><h2>Jetzt interessant</h2>
+<div class="sec"><h2>Weitere frische Signale</h2>
 <p>Signal ausgelöst, Kurs noch nah am Einstieg, und dieselbe Regel hat bei diesem Markt in den letzten ~60 Tagen
 im Schnitt Gewinn gebracht. Die beste Vorgeschichte steht vorne.</p></div>
 {best_html}

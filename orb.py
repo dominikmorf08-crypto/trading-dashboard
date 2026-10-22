@@ -386,11 +386,43 @@ def esc(s):
     return html.escape(str(s))
 
 
+BREAKEVEN = 1 / (1 + TARGET_R)   # 2 R: 33 % Treffer reichen zum Ausgleich
+
+
+def quality(h):
+    """Trefferquote in % und eine Einstufung wie die Zeitmaschine der Skills."""
+    if not h or not h["n"]:
+        return None, "zu wenig Daten", "q-none"
+    win = h["target"] / h["n"]
+    if h["n"] < MIN_HISTORY:
+        return win, "zu wenig Daten", "q-none"
+    edge = (win - BREAKEVEN) * 100
+    if edge >= 15:
+        return win, "stark", "q-strong"
+    if edge >= 5:
+        return win, "gut", "q-good"
+    if edge > -5:
+        return win, "Münzwurf", "q-flip"
+    return win, "schwach", "q-weak"
+
+
 def hist_text(h):
     if not h["n"]:
         return "keine"
     return (f"{h['n']}× · Ziel {h['target']} · Stop {h['stop']} · "
             f"offen {h['neither']} · Ø {h['avgR']:+.2f} R")
+
+
+def quality_html(h):
+    win, label, cls = quality(h)
+    if win is None:
+        return "<p class='quality q-none'>Trefferquote: zu wenig Daten</p>"
+    w = round(win * 100)
+    be = round(BREAKEVEN * 100)
+    return (f"<div class='quality {cls}'><div class='qtop'><b>{w} %</b> Trefferquote "
+            f"<span class='badge'>{label}</span></div>"
+            f"<div class='bar'><span style='width:{w}%'></span><i style='left:{be}%'></i></div>"
+            f"<small>nötig zum Ausgleich: {be} % (Ziel {TARGET_R:g} R)</small></div>")
 
 
 def side_label(side):
@@ -412,6 +444,7 @@ def card(r):
     <div><dt>Ziel ({TARGET_R:g} R)</dt><dd>{fmt(r['target'], d)} <small>{pct(r['target'], r['entry'])}</small></dd></div>
     <div><dt>Jetzt</dt><dd>{fmt(r['price'], d)} <small>{r['R']:+.2f} R</small></dd></div>
   </dl>
+  {quality_html(h)}
   <p class="hist">Gleiche Regel, letzte ~60 Tage: {hist_text(h)}</p>
   {f'<p class="note">{esc(r["note"])}</p>' if r['note'] else ''}
 </article>"""
@@ -445,13 +478,20 @@ def row_html(r):
         x = h[side]
         if not x["n"]:
             return "–"
-        return f"{x['n']}× Ø {x['avgR']:+.2f} R"
+        win, label, cls = quality(x)
+        return (f"<span class='{cls}'><b>{round(win * 100)} %</b> {label}</span><br>"
+                f"<small class='muted'>{x['n']}× · Ø {x['avgR']:+.2f} R</small>")
 
     return (f"<tr class='st-{st}'><td><b>{esc(r['name'])}</b><br>"
             f"<small class='muted'>{esc(r['group'])}</small></td>"
             f"<td>{esc(label)}<br><small class='muted'>{esc(extra)}</small></td>"
             f"<td>{rng}</td><td>{lvl}</td>"
             f"<td>{hs(1)}</td><td>{hs(-1)}</td></tr>")
+
+
+def wr(r, side):
+    win, label, _ = quality(r["hist"][side])
+    return "–" if win is None else f"{round(win * 100)} % ({label})"
 
 
 def render(rows, best, waiting, errors, now):
@@ -465,7 +505,7 @@ def render(rows, best, waiting, errors, now):
         wl = "".join(
             f"<li><b>{esc(r['name'])}</b> ({esc(next(s['name'] for s in SESSIONS if s['key'] == r['session']))}): "
             f"Spanne {fmt(r['lo'], r['dec'])} – {fmt(r['hi'], r['dec'])}, jetzt {fmt(r['last'], r['dec'])}"
-            f" <span class='muted'>· Historie bestes Ø {r['best_hist']:+.2f} R</span></li>"
+            f" <span class='muted'>· Trefferquote Long {wr(r, 1)} / Short {wr(r, -1)}</span></li>"
             for r in waiting[:8])
         wait_html = f"<ul class='wait'>{wl}</ul>"
     else:
@@ -481,7 +521,7 @@ def render(rows, best, waiting, errors, now):
 <h2>{esc(s['name'])}-Session <span class="muted">Start {start} Schweizer Zeit</span></h2>
 <div class="scroll"><table>
 <thead><tr><th>Markt</th><th>Status</th><th>Spanne (15 Min.)</th><th>Einstieg / Stop / Ziel</th>
-<th>Historie Long</th><th>Historie Short</th></tr></thead>
+<th>Trefferquote Long</th><th>Trefferquote Short</th></tr></thead>
 <tbody>{''.join(row_html(r) for r in rs)}</tbody></table></div>
 </section>"""
 
@@ -530,6 +570,17 @@ th,td {{ text-align:left; padding:8px 10px; border-bottom:1px solid var(--line);
 th {{ font-size:12px; color:var(--muted); font-weight:600 }}
 tr.st-open td {{ background:var(--long-bg) }}
 tr.st-stop td:nth-child(2) {{ color:var(--short) }} tr.st-target td:nth-child(2) {{ color:var(--long) }}
+.quality {{ margin:8px 0 4px }} .qtop {{ display:flex; align-items:center; gap:6px; flex-wrap:wrap }}
+.qtop b {{ font-size:20px }}
+.badge {{ font-size:11px; font-weight:700; padding:2px 7px; border-radius:99px; background:var(--line) }}
+.bar {{ position:relative; height:6px; background:var(--line); border-radius:3px; margin:6px 0 3px }}
+.bar span {{ position:absolute; left:0; top:0; bottom:0; border-radius:3px; background:var(--muted) }}
+.bar i {{ position:absolute; top:-3px; bottom:-3px; width:2px; background:var(--text) }}
+.q-strong .badge, .q-strong .bar span {{ background:var(--long); color:#fff }}
+.q-good .badge, .q-good .bar span {{ background:var(--long-bg); color:var(--long) }} .q-good .bar span {{ background:var(--long) }}
+.q-flip .badge {{ background:var(--line) }}
+.q-weak .badge, .q-weak .bar span {{ background:var(--short-bg); color:var(--short) }} .q-weak .bar span {{ background:var(--short) }}
+td .q-strong b, td .q-good b {{ color:var(--long) }} td .q-weak b {{ color:var(--short) }}
 .disclaimer {{ margin-top:32px; font-size:13px; color:var(--muted); border-top:1px solid var(--line); padding-top:12px }}
 </style></head>
 <body><main>
@@ -552,8 +603,10 @@ Sortiert nach diesem Durchschnitt.</p>
 <p><b>So liest du das:</b> Die Eröffnungsspanne sind die ersten 15 Minuten der Session. Ein Signal entsteht, wenn eine
 5-Minuten-Kerze <b>über</b> der Spanne schliesst (Long) oder <b>darunter</b> (Short). Stop = Mitte der Spanne,
 Ziel = {TARGET_R:g}× das Risiko. „R“ ist das Vielfache des Risikos: +{TARGET_R:g} R = Ziel, −1 R = Stop.
-„Historie“ zeigt, wie dieselbe Regel in den letzten ~60 Tagen ausgegangen ist (Anzahl, Ziel, Stop, offen bei
-Session-Ende, Durchschnitt in R).</p>
+„Trefferquote“ = wie oft dieselbe Regel beim gleichen Markt in den letzten ~60 Tagen zuerst das Ziel erreicht hat.
+Weil das Ziel doppelt so weit weg ist wie der Stop, reichen {round(BREAKEVEN * 100)} % zum Ausgleich (der Strich im Balken).
+Einstufung: <b>stark</b> = mind. 15 Prozentpunkte darüber, <b>gut</b> = 5–15 darüber, <b>Münzwurf</b> = weniger als 5 daneben,
+<b>schwach</b> = mehr als 5 darunter. Unter {MIN_HISTORY} Fällen: zu wenig Daten. Gebühren und Spread sind nicht eingerechnet.</p>
 <p><b>Keine Anlageberatung.</b> Kostenlose, verzögerte Yahoo-Daten. Futures und Kassakurse weichen von den CFD-Kursen
 deines Brokers ab: Übernimm Stop und Ziel als Prozent-Abstand, nicht als feste Zahl. CFDs und Krypto haben oft einen
 Hebel, damit kannst du mehr verlieren als hier berechnet. Die Historie ist kein Versprechen für die Zukunft.

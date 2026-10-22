@@ -16,6 +16,7 @@ verzoegert). Keine Anlageberatung. Es wird nichts gekauft oder verkauft.
 """
 
 import argparse
+import bisect
 import html
 import json
 import os
@@ -347,6 +348,8 @@ def evaluate(now, offline=None, pause=0.3):
                 rows.append(dict(symbol=sym, name=name, group=group, dec=dec,
                                  note=note, session=s["key"], status="error"))
             continue
+        mr0 = MIN_RISK_PCT_FX if group == "Devisen" else MIN_RISK_PCT
+        BT[sym] = bt_trades(bars, sym, group, local(now, "us").date(), mr0)
         for s in SESSIONS:
             if sym in LONDON_ONLY and s["key"] != "london":
                 continue
@@ -734,6 +737,7 @@ h1 {{ font-size:44px; line-height:1; margin:0; font-weight:700; letter-spacing:-
 .top p {{ margin:0; color:var(--muted) }}
 .count {{ font-family:"Barlow Semi Condensed",sans-serif; font-size:18px; color:var(--ink) }}
 .count b {{ color:var(--long) }}
+.btlink {{ font:500 15px Barlow,sans-serif; color:var(--ink); text-underline-offset:3px }}
 
 .tl {{ margin:6px 0 34px }}
 .tl-track {{ position:relative; height:46px; background:var(--surface); border:1px solid var(--line); border-radius:8px }}
@@ -887,7 +891,8 @@ tr.st-open td, tr.st-open th {{ background:var(--long-soft) }}
 <body><main>
 <header class="top">
   <div><h1>Breakout-Board</h1><p>{when}</p></div>
-  <p class="count"><b>{len(best)}</b> frische Signale, {n_open} offen insgesamt</p>
+  <p class="count"><b>{len(best)}</b> frische Signale, {n_open} offen insgesamt<br>
+  <a class="btlink" href="rueckrechnung.html">Was wäre mit 100 pro Markt herausgekommen?</a></p>
 </header>
 {zones(rows, now)}
 {timeline(rows, now)}
@@ -946,6 +951,229 @@ Trade, und die meisten Daytrader verlieren Geld.</p>
 """
 
 
+# --------------------------------------------------------------------------
+# Rueckrechnung: was waere aus 100 pro Markt geworden?
+# --------------------------------------------------------------------------
+
+BT_START = 100.0
+BT_LEVERAGES = [100, 10]
+# Spread hin und zurueck, in % vom Positionswert (grobe CFD-Werte)
+BT_COST = {"Devisen": 0.0001, "Indizes": 0.0002, "Rohstoffe": 0.0003, "Krypto": 0.0010}
+BT_SCENARIOS = [
+    ("stark", {"stark"}, "Nur Signale mit Einstufung „stark“"),
+    ("gut", {"stark", "gut"}, "Signale mit „stark“ oder „gut“"),
+]
+BT = {}   # symbol -> Liste der Trades, wird in evaluate() gefuellt
+
+
+def bt_trades(bars, sym, group, today, min_risk):
+    """Alle vergangenen Signale mit Einstufung NUR aus den Tagen davor (kein Blick in die Zukunft)."""
+    trades = []
+    tss = [b[0] for b in bars]
+    for s in SESSIONS:
+        if sym in LONDON_ONLY and s["key"] != "london":
+            continue
+        days = sorted({local(b[0], s["tz"]).date() for b in bars})
+        past = {1: [], -1: []}
+        for d in days:
+            if d >= today:
+                continue
+            r = run_session(bars, d, s, min_risk=min_risk)
+            if r.get("status") not in ("stop", "target", "closed"):
+                continue
+            side, entry = r["side"], r["entry"]
+            prior = past[side]
+            n = len(prior)
+            label = "zu wenig Daten"
+            if n >= MIN_HISTORY:
+                win = sum(1 for x in prior if x >= TARGET_R) / n
+                _, label, _ = quality(dict(n=n, target=round(win * n), stop=0, neither=0, avgR=0))
+            exit_ts = r.get("exit_ts", r["t_end"])
+            if r["status"] == "stop":
+                exit_px = r["stop"]
+            elif r["status"] == "target":
+                exit_px = r["target"]
+            else:
+                exit_px = r["price"]
+            worst = entry
+            i = bisect.bisect_left(tss, r["trig_ts"])
+            j = bisect.bisect_left(tss, exit_ts)
+            for b in bars[i:j]:
+                worst = min(worst, b[3]) if side > 0 else max(worst, b[2])
+            mae = side * (entry - worst) / entry          # groesste Bewegung gegen den Trade
+            if r["status"] == "stop":                     # am Stop ist Schluss
+                mae = min(mae, abs(entry - r["stop"]) / entry)
+            trades.append(dict(date=d.isoformat(), session=s["key"], side=side, entry_ts=r["trig_ts"],
+                               exit_ts=exit_ts, entry=entry, exit=exit_px, R=r["R"], label=label,
+                               ret=side * (exit_px - entry) / entry, mae=max(0.0, mae)))
+            prior.append(r["R"])
+    trades.sort(key=lambda t: t["entry_ts"])
+    return trades
+
+
+def bt_run(trades, labels, lev, cost):
+    bal, busy_until = BT_START, 0
+    n = wins = liq = 0
+    peak, low = BT_START, BT_START
+    for t in trades:
+        if t["label"] not in labels or t["entry_ts"] < busy_until:
+            continue
+        busy_until = t["exit_ts"]
+        n += 1
+        size = bal * lev
+        if t["mae"] >= 1 / lev:           # Kurs lief um die ganze Marge gegen uns: Konto leer
+            pnl = -bal
+            liq += 1
+        else:
+            pnl = size * t["ret"] - size * cost
+        wins += pnl > 0
+        bal = max(0.0, bal + pnl)
+        peak, low = max(peak, bal), min(low, bal)
+        if bal < 0.01:
+            bal = 0.0
+            break
+    return dict(n=n, wins=wins, liq=liq, end=round(bal, 2), peak=round(peak, 2), low=round(low, 2),
+                busted=bal == 0.0)
+
+
+def bt_results():
+    res = {}
+    for sym, name, group, dec, note in MARKETS:
+        trades = BT.get(sym)
+        if trades is None:
+            continue
+        cost = BT_COST.get(group, 0.0003)
+        res[sym] = dict(name=name, group=group, ntr=len(trades),
+                        first=trades[0]["date"] if trades else None,
+                        last=trades[-1]["date"] if trades else None,
+                        runs={(k, lev): bt_run(trades, labels, lev, cost)
+                              for k, labels, _ in BT_SCENARIOS for lev in BT_LEVERAGES})
+    return res
+
+
+def chf(x):
+    return f"{x:,.0f}".replace(",", "'")
+
+
+def render_bt(res, now):
+    stamp = local(now, "ch").strftime("%d.%m.%Y %H:%M")
+    firsts = [v["first"] for v in res.values() if v["first"]]
+    lasts = [v["last"] for v in res.values() if v["last"]]
+    period = (f"{datetime.fromisoformat(min(firsts)).strftime('%d.%m.')} bis "
+              f"{datetime.fromisoformat(max(lasts)).strftime('%d.%m.%Y')}") if firsts else "–"
+    blocks = ""
+    for key, labels, title in BT_SCENARIOS:
+        for lev in BT_LEVERAGES:
+            runs = {s: v["runs"][(key, lev)] for s, v in res.items()}
+            used = {s: r for s, r in runs.items() if r["n"]}
+            invest = BT_START * len(used)
+            end = sum(r["end"] for r in used.values())
+            busted = sum(1 for r in used.values() if r["busted"])
+            ntr = sum(r["n"] for r in used.values())
+            liq = sum(r["liq"] for r in used.values())
+            delta = end - invest
+            ends = sorted(r["end"] for r in used.values())
+            med = _q(ends, .5) if ends else 0
+            gain = sum(1 for e in ends if e > BT_START)
+            cls = "up" if delta > 0 else "down"
+            rows = ""
+            for s, r in sorted(used.items(), key=lambda kv: kv[1]["end"], reverse=True):
+                v = res[s]
+                st = "Konto leer" if r["busted"] else ""
+                rows += (f"<tr class='{'bust' if r['busted'] else ''}'><th scope='row'>{esc(v['name'])}</th>"
+                         f"<td data-l='Trades'>{r['n']}</td><td data-l='Gewinner'>{r['wins']}</td>"
+                         f"<td data-l='Liquidiert'>{r['liq']}</td>"
+                         f"<td data-l='Endstand' class='{'pos' if r['end'] > BT_START else 'neg'}'><b>{chf(r['end'])}</b></td>"
+                         f"<td data-l='Tiefster Stand'>{chf(r['low'])}</td><td data-l=''>{st}</td></tr>")
+            skipped = len(res) - len(used)
+            blocks += f"""
+<section class="bt">
+<header><h2>{esc(title)}, Hebel {lev}</h2></header>
+<div class="sum {cls}">
+  <div><span>Eingesetzt</span><b>{chf(invest)}</b><small>{len(used)} Märkte × {chf(BT_START)}</small></div>
+  <div><span>Ende</span><b>{chf(end)}</b><small>{'+' if delta >= 0 else '−'}{chf(abs(delta))} ({delta / invest * 100 if invest else 0:+.0f} %)</small></div>
+  <div><span>Trades</span><b>{ntr}</b><small>{liq} davon liquidiert</small></div>
+  <div><span>Konten im Plus</span><b>{gain}</b><small>von {len(used)}, {busted} ganz leer</small></div>
+  <div><span>Typisches Konto</span><b>{chf(med)}</b><small>die Hälfte endet darunter</small></div>
+</div>
+{'<p class="muted">' + str(skipped) + ' Märkte hatten in diesem Zeitraum kein solches Signal und sind nicht mitgezählt.</p>' if skipped else ''}
+<details><summary>Alle Märkte einzeln</summary>
+<div class="scroll"><table><thead><tr><th>Markt</th><th>Trades</th><th>Gewinner</th><th>Liquidiert</th>
+<th>Endstand</th><th>Tiefster Stand</th><th></th></tr></thead><tbody>{rows}</tbody></table></div></details>
+</section>"""
+
+    return f"""<!doctype html>
+<html lang="de"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rückrechnung</title>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@500;600;700&family=Barlow:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root {{ --bg:#EEF1F5; --surface:#FFFFFF; --ink:#15233B; --muted:#5D6B80; --line:#D5DCE6;
+  --long:#0E8A6A; --long-soft:#DDF2EA; --short:#C8364B; --short-soft:#F8E1E5; --range:#E4A11B; }}
+@media (prefers-color-scheme: dark) {{ :root:not([data-theme="light"]) {{
+  --bg:#0E1625; --surface:#16223A; --ink:#E4EAF3; --muted:#8D9AB0; --line:#26344D;
+  --long:#3DCB9E; --long-soft:#123A32; --short:#F0667A; --short-soft:#3F1C26; --range:#F2B544; }} }}
+:root[data-theme="dark"] {{ --bg:#0E1625; --surface:#16223A; --ink:#E4EAF3; --muted:#8D9AB0; --line:#26344D;
+  --long:#3DCB9E; --long-soft:#123A32; --short:#F0667A; --short-soft:#3F1C26; --range:#F2B544; }}
+* {{ box-sizing:border-box }}
+body {{ margin:0; background:var(--bg); color:var(--ink); font:16px/1.5 Barlow,system-ui,sans-serif }}
+main {{ max-width:980px; margin:0 auto; padding:24px 16px 56px }}
+h1, h2, .sum b {{ font-family:"Barlow Semi Condensed",Barlow,sans-serif }}
+h1 {{ font-size:40px; line-height:1.05; margin:0 0 4px }}
+h2 {{ font-size:23px; margin:0 0 10px }}
+a {{ color:inherit }}
+.muted, .lead {{ color:var(--muted) }} .lead {{ max-width:72ch; margin:6px 0 24px }}
+.bt {{ background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:16px }}
+.sum {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px }}
+.sum div {{ display:flex; flex-direction:column }}
+.sum span {{ font-size:13px; color:var(--muted) }}
+.sum b {{ font-size:32px; line-height:1.1; font-variant-numeric:tabular-nums }}
+.sum small {{ color:var(--muted); font-size:13px }}
+.sum.up div:nth-child(2) b {{ color:var(--long) }} .sum.down div:nth-child(2) b {{ color:var(--short) }}
+details {{ margin-top:12px }} summary {{ cursor:pointer; color:var(--muted) }}
+.scroll {{ overflow-x:auto }}
+table {{ border-collapse:collapse; width:100%; margin-top:8px; font-variant-numeric:tabular-nums }}
+th, td {{ text-align:left; padding:7px 10px; border-top:1px solid var(--line); font-size:14.5px }}
+thead th {{ font-size:12.5px; color:var(--muted); border-top:0 }}
+td.pos {{ color:var(--long) }} td.neg {{ color:var(--short) }}
+tr.bust td:last-child {{ color:var(--short); font-weight:600 }}
+.how {{ margin-top:28px; color:var(--muted); font-size:14px }} .how p {{ max-width:76ch }} .how b {{ color:var(--ink) }}
+@media (max-width:640px) {{
+  h1 {{ font-size:32px }}
+  .sum {{ grid-template-columns:1fr 1fr }}
+  .sum b {{ font-size:28px }}
+  thead {{ display:none }}
+  table, tbody, tr, th, td {{ display:block }}
+  tbody tr {{ display:grid; grid-template-columns:1fr 1fr 1fr; gap:2px 10px; padding:10px 0; border-top:1px solid var(--line) }}
+  tbody th {{ grid-column:1 / -1; border:0; padding:0; font-size:16px }}
+  tbody td {{ border:0; padding:0 }}
+  td[data-l]::before {{ content:attr(data-l); display:block; font-size:11.5px; color:var(--muted) }}
+}}
+</style></head><body><main>
+<p><a href="./">← Zurück zum Board</a></p>
+<h1>Was wäre herausgekommen?</h1>
+<p class="lead">Rückrechnung vom {period}: Jeder Markt bekommt ein eigenes Konto mit {chf(BT_START)}. Gewinne und
+Verluste bleiben drin, der nächste Trade läuft mit dem neuen Kontostand. Berechnet am {stamp} Uhr.</p>
+{blocks}
+<div class="how">
+<h2>So wurde gerechnet</h2>
+<p><b>Kein Blick in die Zukunft.</b> Ob ein Signal „stark“ oder „gut“ war, entscheidet nur, wie dieselbe Regel an
+den Tagen <b>davor</b> abgeschnitten hat. Die ersten Wochen fehlen deshalb, weil es noch zu wenig Vorgeschichte gab.</p>
+<p><b>Hebel {BT_LEVERAGES[0]}:</b> Mit {chf(BT_START)} bewegst du {chf(BT_START * BT_LEVERAGES[0])}. Läuft der Kurs während des
+Trades um 1 % gegen dich, ist das ganze Konto weg („liquidiert“), auch wenn der Stop weiter entfernt liegt. Viele
+Broker schliessen schon bei 50 % Verlust der Marge, dann wäre es noch schlechter. Zum Vergleich steht jeweils auch
+Hebel {BT_LEVERAGES[1]} da.</p>
+<p><b>Ablauf:</b> Einstieg zum Schlusskurs der Ausbruchskerze, Ausstieg am Stop, am Ziel oder am Session-Ende.
+Pro Konto immer nur ein Trade gleichzeitig. Spread hin und zurück: Devisen 0,01 %, Indizes 0,02 %, Rohstoffe
+0,03 %, Krypto 0,10 % vom Positionswert. Übernacht-Gebühren entfallen, weil alles am selben Tag geschlossen wird.
+Ein Stop kann in echt schlechter ausgeführt werden.</p>
+<p><b>Wichtig:</b> Das sind gut 6 Wochen Vergangenheit, kein Versprechen. Für Privatkunden in der Schweiz und in der EU
+erlauben regulierte Broker meist höchstens Hebel 30 bei Devisen, 20 bei Indizes und Gold und 2 bei Krypto.</p>
+</div>
+</main></body></html>
+"""
+
+
 def to_json(rows, best, now):
     def clean(r):
         r = dict(r)
@@ -977,6 +1205,12 @@ def main(argv=None):
         f.write(render(rows, best, waiting, errors, now))
     with open(os.path.join(a.out, "data.json"), "w", encoding="utf-8") as f:
         json.dump(to_json(rows, best, now), f, ensure_ascii=False, indent=1)
+    res = bt_results()
+    with open(os.path.join(a.out, "rueckrechnung.html"), "w", encoding="utf-8") as f:
+        f.write(render_bt(res, now))
+    with open(os.path.join(a.out, "rueckrechnung.json"), "w", encoding="utf-8") as f:
+        json.dump({s: dict(v, runs={f"{k}-{lev}": r for (k, lev), r in v["runs"].items()})
+                   for s, v in res.items()}, f, ensure_ascii=False, indent=1)
     ok = len(MARKETS) - len(errors)
     print(f"{ok} von {len(MARKETS)} Maerkten geladen, {len(best)} frische Signale, "
           f"{len(waiting)} warten. -> {os.path.join(a.out, 'index.html')}")
